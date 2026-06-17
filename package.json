@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "description": "Gemini Enterprise Model Context Protocol (MCP) Server",
   "main": "build/index.js",
-  "bin": "./build/index.js",
+  "bin": {
+    "ge-app-mcp": "build/index.js"
+  },
   "type": "module",
   "scripts": {
     "build": "tsc",
