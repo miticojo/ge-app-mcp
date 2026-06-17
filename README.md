@@ -20,7 +20,7 @@ The server provides complete (100% operational coverage) mapping to the core gRP
 *   **Document Retrieval (`gemini_enterprise_get_document`)**: Allows the agent to download the entire contents and structured metadata of an indexed document for in-depth analysis.
 
 ### ⚙️ Control Plane (Administration & Tuning)
-*   **App & Engine Management (`gemini_enterprise_manage_apps`)**: Complete CRUD operations to create and configure search and chat applications with Long-Running Operations (LRO).
+*   **App & Engine Management (`gemini_enterprise_manage_apps`)**: Complete CRUD and IAM operations to create, configure, retrieve, and set access policies for search and chat applications. LRO is fully supported.
 *   **DataStore Management (`gemini_enterprise_manage_datastore`)**: Instantiation and deletion of structured and unstructured Data Stores with custom industry verticals (e.g., `GENERIC`, `MEDIA`).
 *   **Advanced Web Search (`gemini_enterprise_manage_target_sites`)**: Management of target sites (URLs and glob patterns) for automatic website crawling.
 *   **Bulk Document Ingestion (`gemini_enterprise_manage_documents`)**: Asynchronous ingestion and purging of documents from Cloud Storage (`gs://...`) or BigQuery sources.
@@ -78,32 +78,37 @@ npm run build
 
 ## 🧪 Testing Suite
 
-To ensure stability and facilitate onboarding, the repository includes four ready-to-use testing scripts to validate connectivity, security, and the MCP interface:
+To ensure stability and facilitate onboarding, the repository includes a suite of testing scripts under the `tests/` directory to validate connectivity, security, and the MCP interface:
 
 1.  **`test_mcp_client.mjs` (MCP Protocol Handshake)**:
     Performs a standard handshake with the MCP server via stdio and prints the list of registered tools with their JSON schemas.
     ```bash
-    node test_mcp_client.mjs
+    node tests/test_mcp_client.mjs
     ```
 2.  **`test_suite_readonly.mjs` (GCP Read-Only Validation)**:
     Scans the available datastores in the configured GCP project, querying schemas, target sites, serving controls, and testing search queries.
     ```bash
-    node test_suite_readonly.mjs
+    node tests/test_suite_readonly.mjs
     ```
 3.  **`test_admin_write.mjs` (GCP Control Plane Safe Write/Delete)**:
     Executes a complete read/write lifecycle on the Control Plane (creates a temporary synonym control, verifies its existence via list, and immediately deletes it). **100% safe with zero residue left on your Cloud project.**
     ```bash
-    node test_admin_write.mjs
+    node tests/test_admin_write.mjs
     ```
 4.  **`test_agents_write.mjs` (Native Agent Lifecycle Safe Write/Delete)**:
     Executes a complete lifecycle check on native Discovery Engine Agents (creates a temporary agent, lists and updates it, then deletes it with zero residues remaining).
     ```bash
-    node test_agents_write.mjs
+    node tests/test_agents_write.mjs
     ```
-5.  **`test_mcp_scopes.mjs` (Scope & Security Enforcement Suite)**:
+5.  **`test_iam.mjs` (App IAM Policy Roundtrip Validation)**:
+    Verifies that retrieving and setting IAM policies on individual Engines/Apps works correctly and safely.
+    ```bash
+    node tests/test_iam.mjs
+    ```
+6.  **`test_mcp_scopes.mjs` (Scope & Security Enforcement Suite)**:
     Validates that environment-based tool restrictions (`MCP_SCOPES`) work correctly. It tests `search` only, `search,billing`, and full scopes, verifying that unauthorized attempts to call out-of-scope tools are securely rejected with access denied responses.
     ```bash
-    node test_mcp_scopes.mjs
+    node tests/test_mcp_scopes.mjs
     ```
 
 ---

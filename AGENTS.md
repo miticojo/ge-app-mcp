@@ -43,7 +43,7 @@ ge-app-mcp/
 | `gemini_enterprise_search` | `tools/search.ts` | Retrieve semantic search results. | `SearchServiceClient` (Discovery Engine) |
 | `gemini_enterprise_ask` | `tools/search.ts` | Execute Conversational Search RAG. | `ConversationalSearchServiceClient` |
 | `gemini_enterprise_get_document`| `tools/search.ts` | Retrieve full document content & metadata. | `DocumentServiceClient` |
-| `gemini_enterprise_manage_apps` | `tools/admin.ts` | Manage application configurations (CRUD). | `EngineServiceClient` |
+| `gemini_enterprise_manage_apps` | `tools/admin.ts` | Manage application configurations (CRUD & IAM). | `EngineServiceClient` / REST |
 | `gemini_enterprise_manage_datastore`| `tools/admin.ts` | Instantiate or delete datastores. | `DataStoreServiceClient` |
 | `gemini_enterprise_manage_documents`| `tools/admin.ts` | Async document import or purge. | `DocumentServiceClient` |
 | `gemini_enterprise_manage_schema`| `tools/admin.ts` | Create or update datastore JSON schemas.| `SchemaServiceClient` |
@@ -224,36 +224,41 @@ The repository includes a suite of specialized test files to validate changes. *
 1.  **Handshake Validation (`test_mcp_client.mjs`)**:
     Launches the compiled server via stdio, executes an MCP `tools/list` handshake, and displays all registered tools.
     ```bash
-    node test_mcp_client.mjs
+    node tests/test_mcp_client.mjs
     ```
 2.  **Read-Only Integration (`test_suite_readonly.mjs`)**:
     Validates GCP credentials and read operations (scans datastores, schemas, target sites, and executes queries).
     ```bash
-    node test_suite_readonly.mjs
+    node tests/test_suite_readonly.mjs
     ```
 3.  **Safe Write Lifecycle (`test_admin_write.mjs`)**:
     Performs synonym control creation, lists configurations to verify existence, and immediately deletes the control. No residues are left in the GCP project.
     ```bash
-    node test_admin_write.mjs
+    node tests/test_admin_write.mjs
     ```
 4.  **Native Agent Lifecycle (`test_agents_write.mjs`)**:
     Executes native Discovery Engine Agent creation, listing, update, and deletion lifecycle. Leaves zero leftover resource residues in the GCP project.
     ```bash
-    node test_agents_write.mjs
+    node tests/test_agents_write.mjs
     ```
 5.  **Low-Code Agent Lifecycle (`test_low_code_agents.mjs`)**:
     Validates native, employee-made low-code agent creation, listing, and deletion. Leaves zero residue in GCP.
     ```bash
-    node test_low_code_agents.mjs
+    node tests/test_low_code_agents.mjs
     ```
-6.  **Security Scope Enforcement (`test_mcp_scopes.mjs`)**:
+6.  **App IAM Policy Lifecycle (`test_iam.mjs`)**:
+    Validates App/Engine IAM policy reading, parsing, and writing roundtrip. Leaves zero residues in GCP.
+    ```bash
+    node tests/test_iam.mjs
+    ```
+7.  **Security Scope Enforcement (`test_mcp_scopes.mjs`)**:
     Spawns multiple handshakes with varied `MCP_SCOPES` variables (e.g. `search` only, `search,billing`, full scope) and verifies that unauthorized tool calls are securely blocked at the gatekeeper level.
     ```bash
-    node test_mcp_scopes.mjs
+    node tests/test_mcp_scopes.mjs
     ```
 
 ### 📋 AI Verification Checklist
 - [ ] TypeScript compilation succeeds with zero errors: `npm run build`.
-- [ ] Handshake test succeeds: `node test_mcp_client.mjs` displays correct schemas.
-- [ ] Security scope suite executes cleanly: `node test_mcp_scopes.mjs` reports `PASS` on all security gates.
+- [ ] Handshake test succeeds: `node tests/test_mcp_client.mjs` displays correct schemas.
+- [ ] Security scope suite executes cleanly: `node tests/test_mcp_scopes.mjs` reports `PASS` on all security gates.
 - [ ] All code modifications, comment additions, and documentation changes are written in English.

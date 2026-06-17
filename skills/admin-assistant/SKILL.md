@@ -32,13 +32,18 @@ To monitor and manage Gemini Enterprise / Gemini Code Assist licenses allocated 
 2.  **Assign User Seats**: To allocate a license seat to a user, call `gemini_enterprise_manage_licenses` with `action: "assign"` and pass the list of emails in `usernames`. You can specify a particular `subscription_id` or let the server auto-detect an active subscription with free seats.
 3.  **Unassign User Seats**: To reclaim a seat from a user, call `gemini_enterprise_manage_licenses` with `action: "unassign"` and pass the target user emails in `usernames` to remove assignments and release seats.
 
-### 5. Prerequisites & Security Scopes
-Admin and licensing capabilities are subject to strict access controls:
-*   **Required Scopes**: Administrative tools (e.g., app creation, datastore creation) require the `admin` scope. Licensing tools require the `billing` scope.
-*   **Enforcement**: If you try to run any of these tools and receive an "Access Denied" error, explain to the user that the MCP server must be re-initialized with the correct `MCP_SCOPES` (e.g. `MCP_SCOPES=admin,billing`).
-*   **Least Privilege**: Only use billing and admin operations when explicitly requested. For standard coding and documentation queries, rely entirely on the `search` scope.
+### 5. App IAM Policy Management (Access Control)
+To retrieve or configure IAM policies on specific applications (engines):
+1.  **Retrieve IAM Policy**: Call `gemini_enterprise_manage_apps` with `action: "get-iam"` and the target `engine_id`. This returns the policy bindings along with its current `etag`.
+2.  **Set/Update IAM Policy**: Call `gemini_enterprise_manage_apps` with `action: "set-iam"`, providing the `engine_id` and the new `policy` object. To prevent concurrent overwrite conflicts, ensure the policy includes the latest `etag` returned by `get-iam`.
 
-### 6. Safety-by-Default & Accidental Data Loss Prevention (CRITICAL)
+### 6. Prerequisites & Security Scopes
+Admin, licensing, and IAM capabilities are subject to strict access controls:
+*   **Required Scopes**: Administrative and IAM tools (e.g., app creation, IAM updates) require the `admin` scope. Licensing tools require the `billing` scope.
+*   **Enforcement**: If you try to run any of these tools and receive an "Access Denied" error, explain to the user that the MCP server must be re-initialized with the correct `MCP_SCOPES` (e.g. `MCP_SCOPES=admin,billing`).
+*   **Least Privilege**: Only use billing and admin/IAM operations when explicitly requested. For standard coding and documentation queries, rely entirely on the `search` scope.
+
+### 7. Safety-by-Default & Accidental Data Loss Prevention (CRITICAL)
 To prevent accidental service interruptions, license disruptions, or irreversible data loss, you must strictly adhere to the following safety gatekeeping protocol:
 *   **Explicit User Confirmation Required**: Before executing any tool call that performs a **destructive, deleting, purging, or unassigning action**, you **MUST** halt execution and ask the user for explicit, unambiguous confirmation.
 *   **Affected Tool Actions**:
