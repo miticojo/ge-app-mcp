@@ -108,20 +108,28 @@ To ensure stability and facilitate onboarding, the repository includes four read
 
 ---
 
-## 🏃 Running the Server
+## 🏃 Running & Installing the Server
 
-The MCP server communicates via **stdio** transport and can be run either directly from the npm registry (recommended for seamless integration) or compiled locally from source.
+The MCP server communicates via **stdio** transport. You can easily register it, compile it locally, or automate the entire setup.
 
-### Option A: Run directly via `npx` (No Cloning Required)
-You can configure your IDE or MCP client to run the server directly from npm using `npx`. This completely bypasses the need to manually clone and compile the repository:
+### ⚡ Option A: Automatic Installation (Highly Recommended)
+You can automatically add and register `ge-app-mcp` in your favorite AI coding assistant (Claude Desktop, Cursor, Claude Code, etc.) using the open-source [add-mcp](https://github.com/neondatabase/add-mcp) utility:
+
+```bash
+npx add-mcp ge-app-mcp --env "GCP_PROJECT=your-gcp-project-id" --env "MCP_SCOPES=search,admin,billing"
+```
+*(This automatically discovers your installed AI agents, configures their configuration files, and passes the required environment variables securely.)*
+
+### Option B: Manual Execution via `npx`
+To run the server directly from npm without cloning:
 ```bash
 npx -y ge-app-mcp
 ```
 
-### Option B: Compile and Run Locally
-If you cloned the source code locally, build and execute using:
+### Option C: Compile and Run Locally
 ```bash
-# Compile and start
+# Clone, install dependencies, compile and start:
+npm install
 npm run build
 npm start
 
@@ -131,18 +139,27 @@ npm run dev
 
 ---
 
-## 🧩 Managing Pre-Built Agent Skills (CLI)
+## 🧩 Managing Pre-Built Agent Skills
 
-The package includes a built-in CLI utility to help you discover and install pre-built Vertex AI platform/agent skills directly into your local workspaces:
+This project fully supports the open **Agent Skills** specification (compatible with Vercel's `skills` CLI and standard coding agents). You can manage them in two ways:
 
-### 1. List Available Pre-Built Skills
-List all skills included in the package alongside their IDs and descriptions:
+### ⚡ Option A: Automatic via Vercel's `skills` CLI (Recommended)
+You can instantly install and load all our pre-built enterprise skills into your workspace using Vercel's [skills CLI](https://github.com/vercel-labs/skills):
+
+```bash
+npx skills add miticojo/ge-app-mcp
+```
+
+### Option B: Handled via the Local package CLI
+If you prefer, you can use the built-in CLI utility bundled with our package to list and copy skills manually:
+
+#### 1. List Available Pre-Built Skills
 ```bash
 npx ge-app-mcp skills list
 ```
 
-### 2. Install a Pre-Built Skill
-Copy a pre-built skill template file into your local project workspace (defaults to `./skills/` if the target directory is omitted):
+#### 2. Install a Pre-Built Skill
+Copy a pre-built skill folder into your local project workspace (defaults to `./skills/` if target directory is omitted):
 ```bash
 npx ge-app-mcp skills install <skill-id> [target-directory]
 
@@ -182,10 +199,13 @@ ge-app-mcp/
 │       ├── search.ts          # Search tool implementations (Data Plane)
 │       ├── admin.ts           # Admin tool implementations (Control Plane)
 │       └── billing.ts         # Billing & license management tools (Control Plane)
-└── skills/                    # Agent Skills templates (instruction prompt markdown files)
-    ├── admin-assistant.md     # Skill for DevOps and infrastructure orchestration
-    ├── enterprise-context.md  # Skill for secure zero-trust enterprise search
-    └── codebase-rag.md        # Skill for debugging and conversational code context
+└── skills/                    # Agent Skills templates conforming to Vercel Agent Skills standard
+    ├── admin-assistant/
+    │   └── SKILL.md           # Skill for DevOps and infrastructure orchestration
+    ├── enterprise-context/
+    │   └── SKILL.md           # Skill for secure zero-trust enterprise search
+    └── codebase-rag/
+        └── SKILL.md           # Skill for debugging and conversational code context
 ```
 
 ---

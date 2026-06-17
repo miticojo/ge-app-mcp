@@ -1,7 +1,9 @@
-# Skill: Enterprise Context Retriever
+---
+name: enterprise-context
+description: This skill instructs the agent never to make assumptions or hallucinate answers regarding proprietary corporate systems, internal architectures, or internal codebase patterns.
+---
 
-## Description
-This skill instructs the agent never to make assumptions or hallucinate answers regarding proprietary corporate systems, internal architectures, or internal codebase patterns. It obligates the agent to always use the search tools provided by the MCP server to collect accurate context and reference official corporate sources.
+# Enterprise Context Retriever
 
 ## System Prompt / Behavioral Instructions for the Agent
 If the user asks questions related to:
@@ -18,4 +20,3 @@ If the user asks questions related to:
 ### Prerequisites & Security Scopes
 *   **Required Scope**: This skill relies entirely on the `search` scope to perform semantic and document search queries.
 *   **Enforcement**: Verify that the MCP server has the `search` scope enabled. If any search tool returns an "Access Denied" error, request the user to add the `search` scope to the `MCP_SCOPES` environment variable.
-

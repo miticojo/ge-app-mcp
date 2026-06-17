@@ -1,7 +1,9 @@
-# Skill: Codebase RAG Assistant
+---
+name: codebase-rag
+description: This skill enables the agent to act as a senior software development assistant capable of querying the Gemini Enterprise Conversational Search API to resolve bugs and understand codebase patterns.
+---
 
-## Description
-This skill enables the agent to act as a senior software development assistant capable of querying the Gemini Enterprise Conversational Search API to resolve complex bugs, interpret error stack traces, and identify architectural patterns documented in corporate wikis.
+# Codebase RAG Assistant
 
 ## System Prompt / Behavioral Instructions for the Agent
 If the user reports a bug, shares an error stack trace, or asks how to resolve an exception in a production or staging environment:
@@ -13,4 +15,3 @@ If the user reports a bug, shares an error stack trace, or asks how to resolve a
 ### Prerequisites & Security Scopes
 *   **Required Scope**: This skill relies entirely on the `search` scope to execute RAG queries.
 *   **Enforcement**: Verify that the MCP server has the `search` scope enabled. If any search tool returns an "Access Denied" error, request the user to add the `search` scope to the `MCP_SCOPES` environment variable.
-

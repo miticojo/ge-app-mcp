@@ -113,25 +113,39 @@ function handleCliCommands(): boolean {
     console.log('============================================');
     try {
       const files = fs.readdirSync(packageSkillsDir);
-      const mdFiles = files.filter(f => f.endsWith('.md'));
+      const dirs = files.filter(f => {
+        const fullPath = path.join(packageSkillsDir, f);
+        return fs.statSync(fullPath).isDirectory() && fs.existsSync(path.join(fullPath, 'SKILL.md'));
+      });
       
-      for (const file of mdFiles) {
-        const filePath = path.join(packageSkillsDir, file);
+      for (const dir of dirs) {
+        const filePath = path.join(packageSkillsDir, dir, 'SKILL.md');
         const content = fs.readFileSync(filePath, 'utf-8');
-        const lines = content.split('\n');
         
-        // Simple markdown parsing to get Skill Name and Description
-        const titleLine = lines.find(l => l.startsWith('# '));
-        const title = titleLine ? titleLine.replace('# ', '').trim() : file;
-        
+        let title = dir;
         let desc = 'No description provided.';
-        const descIndex = lines.findIndex(l => l.toLowerCase().startsWith('## description'));
-        if (descIndex !== -1 && lines[descIndex + 1]) {
-          desc = lines[descIndex + 1].trim();
+        
+        // Simple YAML frontmatter parser
+        const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+        if (match) {
+          const yaml = match[1];
+          const lines = yaml.split('\n');
+          for (const line of lines) {
+            const parts = line.split(':');
+            if (parts.length >= 2) {
+              const key = parts[0].trim();
+              const value = parts.slice(1).join(':').trim();
+              if (key === 'name') title = value;
+              else if (key === 'description') desc = value;
+            }
+          }
+        } else {
+          const lines = content.split('\n');
+          const titleLine = lines.find(l => l.startsWith('# '));
+          if (titleLine) title = titleLine.replace('# ', '').trim();
         }
         
-        const skillId = path.basename(file, '.md');
-        console.log(`\n• 🆔 ID: \x1b[36m${skillId}\x1b[0m`);
+        console.log(`\n• 🆔 ID: \x1b[36m${dir}\x1b[0m`);
         console.log(`  📝 Name: ${title}`);
         console.log(`  ℹ️  Description: ${desc}`);
       }
@@ -153,20 +167,21 @@ function handleCliCommands(): boolean {
       process.exit(1);
     }
 
-    const sourceFile = path.join(packageSkillsDir, `${skillId}.md`);
-    if (!fs.existsSync(sourceFile)) {
+    const sourceDir = path.join(packageSkillsDir, skillId);
+    if (!fs.existsSync(sourceDir) || !fs.statSync(sourceDir).isDirectory()) {
       console.error(`Error: Skill "${skillId}" not found in available templates.`);
       console.error('Run "npx ge-app-mcp skills list" to see valid IDs.');
       process.exit(1);
     }
 
     try {
-      const absoluteDestDir = path.resolve(destDir);
-      if (!fs.existsSync(absoluteDestDir)) {
-        fs.mkdirSync(absoluteDestDir, { recursive: true });
+      const absoluteDestSkillDir = path.resolve(destDir, skillId);
+      if (!fs.existsSync(absoluteDestSkillDir)) {
+        fs.mkdirSync(absoluteDestSkillDir, { recursive: true });
       }
 
-      const destFile = path.join(absoluteDestDir, `${skillId}.md`);
+      const sourceFile = path.join(sourceDir, 'SKILL.md');
+      const destFile = path.join(absoluteDestSkillDir, 'SKILL.md');
       fs.copyFileSync(sourceFile, destFile);
       
       console.log(`\n✅ Success! Skill \x1b[32m"${skillId}"\x1b[0m has been installed to:`);

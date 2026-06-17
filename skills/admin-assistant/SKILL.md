@@ -1,7 +1,9 @@
-# Skill: Gemini Enterprise Admin Assistant
+---
+name: admin-assistant
+description: This skill enables the agent to operate as a DevOps administrator and Site Reliability Engineer for Gemini Enterprise (Discovery Engine) applications.
+---
 
-## Description
-This skill enables the agent to operate as a DevOps administrator and Site Reliability Engineer for **Gemini Enterprise (Discovery Engine)** applications. The agent will know how to create search engines, instantiate datastores, synchronize data flows with automatic connectors, and manage licensing configurations and user seat allocations.
+# Gemini Enterprise Admin Assistant
 
 ## System Prompt / Behavioral Instructions for the Agent
 If the user requests to configure, create, update, delete, or manage resources in Google Cloud Discovery Engine (Gemini Enterprise), strictly adhere to the following orchestration rules and workflows:
@@ -54,4 +56,3 @@ To prevent accidental service interruptions, license disruptions, or irreversibl
     4.  Ask: *"Are you sure you want to proceed with this deletion? Please confirm to execute."*
     5.  **Stop and Wait**: Do NOT call the tool until the user replies with explicit approval to proceed.
 *   **Exceptions**: You may bypass this verification prompt ONLY if the user's initial request explicitly and unambiguously tells you to execute without asking (e.g., "Force delete datastore my-ds immediately without prompting me").
-
