@@ -1,0 +1,33 @@
+{
+  "name": "ge-app-mcp",
+  "version": "0.1.0",
+  "description": "Gemini Enterprise Model Context Protocol (MCP) Server",
+  "main": "build/index.js",
+  "bin": "./build/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node build/index.js",
+    "dev": "node --loader ts-node/esm src/index.ts",
+    "test": "node tests/test_mcp_client.mjs && node tests/test_mcp_scopes.mjs"
+  },
+  "keywords": [
+    "mcp",
+    "gemini",
+    "google-cloud",
+    "discovery-engine",
+    "rag"
+  ],
+  "author": "",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@google-cloud/discoveryengine": "^3.3.0",
+    "@modelcontextprotocol/sdk": "^0.6.0",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.24",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}
