@@ -1,0 +1,21 @@
+# Exclude configuration files
+tsconfig.json
+.DS_Store
+.env*
+!.env.example
+
+# Exclude source files (only compiled JS in build/ is needed)
+src/
+
+# Exclude GitHub actions
+.github/
+
+# Exclude test files
+tests/
+
+# Exclude helper/example scripts
+scripts/
+
+# Exclude temporary or lock files
+skills-lock.json
+package-lock.json
