@@ -1,6 +1,6 @@
 {
   "name": "ge-app-mcp",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Gemini Enterprise Model Context Protocol (MCP) Server",
   "main": "build/index.js",
   "bin": {
@@ -23,7 +23,7 @@
   "author": "",
   "license": "Apache-2.0",
   "dependencies": {
-    "@google-cloud/discoveryengine": "^3.3.0",
+    "@google-cloud/discoveryengine": "^2.7.0",
     "@modelcontextprotocol/sdk": "^0.6.0",
     "dotenv": "^16.4.5"
   },

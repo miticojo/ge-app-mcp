@@ -13,14 +13,14 @@ import { config } from '../config.js';
 export const adminTools: any[] = [
   {
     name: 'gemini_enterprise_manage_apps',
-    description: 'Manage Gemini Enterprise search and chat apps (engines). Supports create, list, delete, and update operations.',
+    description: 'Manage Gemini Enterprise search and chat apps (engines). Supports create, list, delete, update, get-iam, and set-iam operations.',
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['create', 'list', 'delete', 'update'],
-          description: 'The action to perform: create, list, delete, or update.'
+          enum: ['create', 'list', 'delete', 'update', 'get-iam', 'set-iam'],
+          description: 'The action to perform: create, list, delete, update, get-iam, or set-iam.'
         },
         project_id: {
           type: 'string',
@@ -32,7 +32,7 @@ export const adminTools: any[] = [
         },
         engine_id: {
           type: 'string',
-          description: 'ID of the app/engine. Required for create, delete, and update.'
+          description: 'ID of the app/engine. Required for create, delete, update, get-iam, and set-iam.'
         },
         display_name: {
           type: 'string',
@@ -41,6 +41,10 @@ export const adminTools: any[] = [
         solution_type: {
           type: 'string',
           description: 'Required for create. Type of engine (e.g., "SOLUTION_TYPE_SEARCH", "SOLUTION_TYPE_CHAT", "SOLUTION_TYPE_RECOMMENDATION").'
+        },
+        policy: {
+          type: 'object',
+          description: 'Required for set-iam. The IAM policy object to set for the app/engine.'
         }
       },
       required: ['action']
@@ -465,7 +469,7 @@ async function manageApps(args: any): Promise<any> {
 
   const engineId = args.engine_id;
   if (!engineId) {
-    throw new Error('engine_id is required for create, delete, and update actions.');
+    throw new Error('engine_id is required for create, delete, update, get-iam, and set-iam actions.');
   }
 
   const engineName = `${parent}/engines/${engineId}`;
@@ -545,6 +549,69 @@ async function manageApps(args: any): Promise<any> {
               name: updatedEngine.name,
               displayName: updatedEngine.displayName
             }
+          }, null, 2)
+        }
+      ]
+    };
+  }
+
+  if (action === 'get-iam') {
+    console.error(`[Admin] Getting IAM policy for app "${engineId}" in Project "${projectId}"`);
+    const host = `${location}-discoveryengine.googleapis.com`;
+    const url = `https://${host}/v1/projects/${projectId}/locations/${location}/collections/${config.collectionId}/engines/${engineId}:getIamPolicy`;
+    const headers = await getAuthHeaders(projectId);
+    const res = await fetch(url, {
+      method: 'GET',
+      headers
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Failed to get IAM policy: ${res.status} ${res.statusText}. Details: ${text}`);
+    }
+    const data = await res.json() as any;
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            status: 'SUCCESS',
+            message: `Successfully retrieved IAM policy for app "${engineId}".`,
+            policy: data
+          }, null, 2)
+        }
+      ]
+    };
+  }
+
+  if (action === 'set-iam') {
+    const policy = args.policy;
+    if (!policy) {
+      throw new Error('policy object is required for set-iam action.');
+    }
+    console.error(`[Admin] Setting IAM policy for app "${engineId}" in Project "${projectId}"`);
+    const host = `${location}-discoveryengine.googleapis.com`;
+    const url = `https://${host}/v1/projects/${projectId}/locations/${location}/collections/${config.collectionId}/engines/${engineId}:setIamPolicy`;
+    const headers = await getAuthHeaders(projectId);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        policy: policy
+      })
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Failed to set IAM policy: ${res.status} ${res.statusText}. Details: ${text}`);
+    }
+    const data = await res.json() as any;
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            status: 'SUCCESS',
+            message: `Successfully set IAM policy for app "${engineId}".`,
+            policy: data
           }, null, 2)
         }
       ]
