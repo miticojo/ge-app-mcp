@@ -12,7 +12,7 @@
     "start": "node build/index.js",
     "dev": "node --loader ts-node/esm src/index.ts",
     "pretest": "npm run build",
-    "test": "node tests/test_mcp_client.mjs && node tests/test_mcp_scopes.mjs && node tests/test_smoke_api_contract.mjs"
+    "test": "node tests/test_mcp_client.mjs && node tests/test_mcp_scopes.mjs && node tests/test_smoke_api_contract.mjs && node tests/test_format_references.mjs"
   },
   "overrides": {
     "brace-expansion": "^2.0.1"

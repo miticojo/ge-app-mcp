@@ -207,7 +207,7 @@ function formatSearchResult(result: any, index: number): string {
 }
 
 // Formats answer references to markdown
-function formatReferences(references: any[]): string {
+export function formatReferences(references: any[]): string {
   let markdown = '';
   references.forEach((ref, idx) => {
     let title = `Reference ${idx + 1}`;
@@ -228,7 +228,8 @@ function formatReferences(references: any[]): string {
       content = chunk.content || '';
     } else if (ref.structuredDocumentInfo) {
       const structInfo = ref.structuredDocumentInfo;
-      title = `Structured Document ${idx + 1}`;
+      title = structInfo.title || structInfo.uri || `Structured Document ${idx + 1}`;
+      uri = structInfo.uri || '';
       content = JSON.stringify(structInfo.structData || {}, null, 2);
     }
     
