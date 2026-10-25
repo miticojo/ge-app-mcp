@@ -8,6 +8,7 @@ import {
   ServingConfigServiceClient
 } from '@google-cloud/discoveryengine';
 import { config } from '../config.js';
+import { applyFeatureUpdates, describeFeatures, findInvalidFeatureKeys, featureToggleSchemaProperties } from '../domain/engineFeatures.js';
 import { getAuthHeaders, gapicClientOptions, discoveryEngineHost, discoveryEngineBaseUrl, fetchJson } from '../gcp.js';
 
 // Define MCP Tool schemas
@@ -395,80 +396,22 @@ export const adminTools: any[] = [
   },
   {
     name: 'gemini_enterprise_manage_features',
-    description: 'Manage Gemini Enterprise feature toggles (Agent Gallery, Agent Designer, Prompt Gallery, Model Selector, NotebookLM, Session Sharing, Memory). Supports get and update operations.',
+    description: 'Get or update Gemini Enterprise web app feature toggles (Engine.features), or remove invalid legacy keys stored on the engine.',
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['get', 'update'],
-          description: 'The action to perform: get or update feature management settings.'
+          enum: ['get', 'update', 'cleanup_invalid_keys'],
+          description: 'get, update, or cleanup_invalid_keys (removes keys not supported by the API; dry run unless dry_run is false).'
         },
-        project_id: {
-          type: 'string',
-          description: 'Optional. Google Cloud Project ID.'
-        },
-        location: {
-          type: 'string',
-          description: 'Optional. Google Cloud Region.'
-        },
-        engine_id: {
-          type: 'string',
-          description: 'ID of the app/engine. Required.'
-        },
-        enable_agent_gallery: {
-          type: 'boolean',
-          description: 'Enable or disable the Agent Gallery feature.'
-        },
-        enable_agent_designer: {
-          type: 'boolean',
-          description: 'Enable or disable the Agent Designer feature.'
-        },
-        enable_prompt_gallery: {
-          type: 'boolean',
-          description: 'Enable or disable the Prompt Gallery feature.'
-        },
-        enable_model_selector: {
-          type: 'boolean',
-          description: 'Enable or disable the Model Selector feature.'
-        },
-        enable_notebook_lm: {
-          type: 'boolean',
-          description: 'Enable or disable NotebookLM integration.'
-        },
-        enable_session_sharing: {
-          type: 'boolean',
-          description: 'Enable or disable Session Sharing.'
-        },
-        enable_memory: {
-          type: 'boolean',
-          description: 'Enable or disable long-term Memory & Personalization.'
-        },
-        enable_canvas: {
-          type: 'boolean',
-          description: 'Enable or disable the Canvas feature.'
-        },
-        enable_skills: { type: 'boolean', description: 'Enable or disable Skills feature.' },
-        enable_image_generation: { type: 'boolean', description: 'Enable or disable Image Generation.' },
-        enable_video_generation: { type: 'boolean', description: 'Enable or disable Video Generation.' },
-        enable_agent_sharing: { type: 'boolean', description: 'Enable or disable Agent Sharing.' },
-        enable_agent_sharing_without_approval: { type: 'boolean', description: 'Enable Agent Sharing without Admin Approval.' },
-        enable_end_user_sharing_with_groups: { type: 'boolean', description: 'Enable End-user Sharing with Groups.' },
-        enable_google_drive_upload: { type: 'boolean', description: 'Enable or disable Google Drive Upload.' },
-        enable_onedrive_upload: { type: 'boolean', description: 'Enable or disable OneDrive Upload.' },
-        enable_talk_to_content: { type: 'boolean', description: 'Enable or disable Talk to Content.' },
-        enable_suggested_highlights: { type: 'boolean', description: 'Enable or disable Suggested Highlights.' },
-        enable_people_search_org_chart: { type: 'boolean', description: 'Enable or disable People Search & Org Chart.' },
-        enable_welcome_emails: { type: 'boolean', description: 'Enable or disable Welcome Emails.' },
-        enable_projects: { type: 'boolean', description: 'Enable or disable Projects.' },
-        enable_mobile_app_access: { type: 'boolean', description: 'Enable or disable Mobile App Access.' },
-        enable_multi_agent_orchestration: { type: 'boolean', description: 'Enable or disable Multi-Agent Orchestration.' },
-        enable_single_agent_orchestration: { type: 'boolean', description: 'Enable or disable Single-Agent Orchestration.' },
-        enable_bi_directional_audio: { type: 'boolean', description: 'Enable or disable Bi-directional Audio.' },
-        enable_cross_product_intelligence: { type: 'boolean', description: 'Enable or disable Cross-product Intelligence.' },
-        enable_cross_domain_documents: { type: 'boolean', description: 'Enable or disable Include cross-domain documents.' },
-        enable_all_features: { type: 'boolean', description: 'Convenience flag to enable all 27 feature flags at once.' },
-        disable_all_features: { type: 'boolean', description: 'Convenience flag to disable all 27 feature flags at once.' }
+        project_id: { type: 'string', description: 'Optional. Google Cloud Project ID.' },
+        location: { type: 'string', description: 'Optional. Google Cloud Region.' },
+        engine_id: { type: 'string', description: 'ID of the app/engine. Required.' },
+        ...featureToggleSchemaProperties(),
+        enable_all_features: { type: 'boolean', description: 'Enable all toggles except remote-vm, code-extraction, skill sharing without approval and sobi.' },
+        disable_all_features: { type: 'boolean', description: 'Disable all toggles.' },
+        dry_run: { type: 'boolean', description: 'For cleanup_invalid_keys. Defaults to true (report only).' }
       },
       required: ['action', 'engine_id']
     }
@@ -711,6 +654,10 @@ function getGcpParams(args: any) {
 
   const options = gapicClientOptions(projectId, location);
   return { projectId, location, options };
+}
+
+function textResult(payload: unknown) {
+  return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
 }
 
 // Handler routing tool calls to appropriate actions
@@ -1999,188 +1946,52 @@ async function manageSkills(args: any): Promise<any> {
 // 10. Feature Management
 async function manageFeatures(args: any): Promise<any> {
   const { projectId, location } = getGcpParams(args);
-  const parent = `projects/${projectId}/locations/${location}/collections/${config.collectionId}`;
   const engineId = args.engine_id;
-  const engineName = `${parent}/engines/${engineId}`;
+  if (!engineId) throw new Error('engine_id is required.');
+  const engineName = `projects/${projectId}/locations/${location}/collections/${config.collectionId}/engines/${engineId}`;
   const action = args.action;
-
-  const restHeaders = await getAuthHeaders(projectId);
+  const headers = await getAuthHeaders(projectId);
   const baseUrl = `${discoveryEngineBaseUrl(location, 'v1alpha')}/${engineName}`;
 
-  const mapFeaturesToResponse = (f: any) => ({
-    enable_agent_gallery: f['agent-gallery'] === 'FEATURE_STATE_ON',
-    enable_agent_designer: f['no-code-agent-builder'] === 'FEATURE_STATE_ON',
-    enable_prompt_gallery: f['prompt-gallery'] === 'FEATURE_STATE_ON',
-    enable_model_selector: f['model-selector'] === 'FEATURE_STATE_ON',
-    enable_notebook_lm: f['notebook-lm'] === 'FEATURE_STATE_ON',
-    enable_session_sharing: f['session-sharing'] === 'FEATURE_STATE_ON',
-    enable_memory: f['personalization-memory'] === 'FEATURE_STATE_ON',
-    enable_canvas: f['disable-canvas'] !== 'FEATURE_STATE_ON',
-    enable_skills: f['disable-skills'] !== 'FEATURE_STATE_ON',
-    enable_image_generation: f['disable-image-generation'] !== 'FEATURE_STATE_ON',
-    enable_video_generation: f['disable-video-generation'] !== 'FEATURE_STATE_ON',
-    enable_agent_sharing: f['disable-agent-sharing'] !== 'FEATURE_STATE_ON',
-    enable_agent_sharing_without_approval: f['agent-sharing-without-admin-approval'] === 'FEATURE_STATE_ON',
-    enable_end_user_sharing_with_groups: f['enable-end-user-sharing-with-groups'] === 'FEATURE_STATE_ON',
-    enable_google_drive_upload: f['disable-google-drive-upload'] !== 'FEATURE_STATE_ON',
-    enable_onedrive_upload: f['disable-onedrive-upload'] !== 'FEATURE_STATE_ON',
-    enable_talk_to_content: f['disable-talk-to-content'] !== 'FEATURE_STATE_ON',
-    enable_suggested_highlights: f['personalization-suggested-highlights'] === 'FEATURE_STATE_ON',
-    enable_people_search_org_chart: f['people-search-org-chart'] === 'FEATURE_STATE_ON',
-    enable_welcome_emails: f['disable-welcome-emails'] !== 'FEATURE_STATE_ON',
-    enable_projects: f['disable-projects'] !== 'FEATURE_STATE_ON',
-    enable_mobile_app_access: f['mobile-app-access'] === 'FEATURE_STATE_ON',
-    enable_multi_agent_orchestration: f['disable-multi-agent-orchestration'] !== 'FEATURE_STATE_ON',
-    enable_single_agent_orchestration: f['disable-single-agent-orchestration'] !== 'FEATURE_STATE_ON',
-    enable_bi_directional_audio: f['bi-directional-audio'] === 'FEATURE_STATE_ON',
-    enable_cross_product_intelligence: f['cross-product-intelligence'] === 'FEATURE_STATE_ON',
-    enable_cross_domain_documents: f['cross-domain-documents'] === 'FEATURE_STATE_ON' || f['include-cross-domain-documents'] === 'FEATURE_STATE_ON' || f['disable-cross-domain-documents'] === 'FEATURE_STATE_OFF'
-  });
+  const existing = await fetchJson(baseUrl, { headers }, 'Get engine');
+  const current: Record<string, string> = existing.features || {};
+
+  const patchFeatures = (features: Record<string, string>) =>
+    fetchJson(`${baseUrl}?updateMask=features`, { method: 'PATCH', headers, body: JSON.stringify({ features }) }, 'Update engine features');
 
   if (action === 'get') {
-    const res = await fetch(baseUrl, { headers: restHeaders });
-    const data = await res.json();
-    const features = data.features || {};
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            status: 'SUCCESS',
-            engine_id: engineId,
-            features: mapFeaturesToResponse(features)
-          }, null, 2)
-        }
-      ]
-    };
+    return textResult({ status: 'SUCCESS', engine_id: engineId, features: describeFeatures(current) });
   }
 
   if (action === 'update') {
-    const resGet = await fetch(baseUrl, { headers: restHeaders });
-    const existing = await resGet.json();
-    const features = existing.features || {};
-
-    const setState = (val: boolean | undefined, current: string) => {
-      if (val === undefined) return current || 'FEATURE_STATE_ON';
-      return val ? 'FEATURE_STATE_ON' : 'FEATURE_STATE_OFF';
-    };
-
-    const setDisableState = (val: boolean | undefined, current: string) => {
-      if (val === undefined) return current || 'FEATURE_STATE_OFF';
-      return val ? 'FEATURE_STATE_OFF' : 'FEATURE_STATE_ON';
-    };
-
-    if (args.enable_all_features === true) {
-      features['agent-gallery'] = 'FEATURE_STATE_ON';
-      features['no-code-agent-builder'] = 'FEATURE_STATE_ON';
-      features['prompt-gallery'] = 'FEATURE_STATE_ON';
-      features['model-selector'] = 'FEATURE_STATE_ON';
-      features['notebook-lm'] = 'FEATURE_STATE_ON';
-      features['session-sharing'] = 'FEATURE_STATE_ON';
-      features['personalization-memory'] = 'FEATURE_STATE_ON';
-      features['disable-canvas'] = 'FEATURE_STATE_OFF';
-      features['disable-skills'] = 'FEATURE_STATE_OFF';
-      features['disable-image-generation'] = 'FEATURE_STATE_OFF';
-      features['disable-video-generation'] = 'FEATURE_STATE_OFF';
-      features['disable-agent-sharing'] = 'FEATURE_STATE_OFF';
-      features['agent-sharing-without-admin-approval'] = 'FEATURE_STATE_ON';
-      features['enable-end-user-sharing-with-groups'] = 'FEATURE_STATE_ON';
-      features['disable-google-drive-upload'] = 'FEATURE_STATE_OFF';
-      features['disable-onedrive-upload'] = 'FEATURE_STATE_OFF';
-      features['disable-talk-to-content'] = 'FEATURE_STATE_OFF';
-      features['personalization-suggested-highlights'] = 'FEATURE_STATE_ON';
-      features['people-search-org-chart'] = 'FEATURE_STATE_ON';
-      features['disable-welcome-emails'] = 'FEATURE_STATE_OFF';
-      features['disable-projects'] = 'FEATURE_STATE_OFF';
-      features['mobile-app-access'] = 'FEATURE_STATE_ON';
-      features['disable-multi-agent-orchestration'] = 'FEATURE_STATE_OFF';
-      features['disable-single-agent-orchestration'] = 'FEATURE_STATE_OFF';
-      features['bi-directional-audio'] = 'FEATURE_STATE_ON';
-      features['cross-product-intelligence'] = 'FEATURE_STATE_ON';
-      features['include-cross-domain-documents'] = 'FEATURE_STATE_ON';
-    } else if (args.disable_all_features === true) {
-      features['agent-gallery'] = 'FEATURE_STATE_OFF';
-      features['no-code-agent-builder'] = 'FEATURE_STATE_OFF';
-      features['prompt-gallery'] = 'FEATURE_STATE_OFF';
-      features['model-selector'] = 'FEATURE_STATE_OFF';
-      features['notebook-lm'] = 'FEATURE_STATE_OFF';
-      features['session-sharing'] = 'FEATURE_STATE_OFF';
-      features['personalization-memory'] = 'FEATURE_STATE_OFF';
-      features['disable-canvas'] = 'FEATURE_STATE_ON';
-      features['disable-skills'] = 'FEATURE_STATE_ON';
-      features['disable-image-generation'] = 'FEATURE_STATE_ON';
-      features['disable-video-generation'] = 'FEATURE_STATE_ON';
-      features['disable-agent-sharing'] = 'FEATURE_STATE_ON';
-      features['agent-sharing-without-admin-approval'] = 'FEATURE_STATE_OFF';
-      features['enable-end-user-sharing-with-groups'] = 'FEATURE_STATE_OFF';
-      features['disable-google-drive-upload'] = 'FEATURE_STATE_ON';
-      features['disable-onedrive-upload'] = 'FEATURE_STATE_ON';
-      features['disable-talk-to-content'] = 'FEATURE_STATE_ON';
-      features['personalization-suggested-highlights'] = 'FEATURE_STATE_OFF';
-      features['people-search-org-chart'] = 'FEATURE_STATE_OFF';
-      features['disable-welcome-emails'] = 'FEATURE_STATE_ON';
-      features['disable-projects'] = 'FEATURE_STATE_ON';
-      features['mobile-app-access'] = 'FEATURE_STATE_OFF';
-      features['disable-multi-agent-orchestration'] = 'FEATURE_STATE_ON';
-      features['disable-single-agent-orchestration'] = 'FEATURE_STATE_ON';
-      features['bi-directional-audio'] = 'FEATURE_STATE_OFF';
-      features['cross-product-intelligence'] = 'FEATURE_STATE_OFF';
-      features['include-cross-domain-documents'] = 'FEATURE_STATE_OFF';
-    } else {
-      if (args.enable_agent_gallery !== undefined) features['agent-gallery'] = setState(args.enable_agent_gallery, features['agent-gallery']);
-      if (args.enable_agent_designer !== undefined) features['no-code-agent-builder'] = setState(args.enable_agent_designer, features['no-code-agent-builder']);
-    if (args.enable_prompt_gallery !== undefined) features['prompt-gallery'] = setState(args.enable_prompt_gallery, features['prompt-gallery']);
-    if (args.enable_model_selector !== undefined) features['model-selector'] = setState(args.enable_model_selector, features['model-selector']);
-    if (args.enable_notebook_lm !== undefined) features['notebook-lm'] = setState(args.enable_notebook_lm, features['notebook-lm']);
-    if (args.enable_session_sharing !== undefined) features['session-sharing'] = setState(args.enable_session_sharing, features['session-sharing']);
-    if (args.enable_memory !== undefined) features['personalization-memory'] = setState(args.enable_memory, features['personalization-memory']);
-    if (args.enable_canvas !== undefined) features['disable-canvas'] = setDisableState(args.enable_canvas, features['disable-canvas']);
-    if (args.enable_skills !== undefined) features['disable-skills'] = setDisableState(args.enable_skills, features['disable-skills']);
-    if (args.enable_image_generation !== undefined) features['disable-image-generation'] = setDisableState(args.enable_image_generation, features['disable-image-generation']);
-    if (args.enable_video_generation !== undefined) features['disable-video-generation'] = setDisableState(args.enable_video_generation, features['disable-video-generation']);
-    if (args.enable_agent_sharing !== undefined) features['disable-agent-sharing'] = setDisableState(args.enable_agent_sharing, features['disable-agent-sharing']);
-    if (args.enable_agent_sharing_without_approval !== undefined) features['agent-sharing-without-admin-approval'] = setState(args.enable_agent_sharing_without_approval, features['agent-sharing-without-admin-approval']);
-    if (args.enable_end_user_sharing_with_groups !== undefined) features['enable-end-user-sharing-with-groups'] = setState(args.enable_end_user_sharing_with_groups, features['enable-end-user-sharing-with-groups']);
-    if (args.enable_google_drive_upload !== undefined) features['disable-google-drive-upload'] = setDisableState(args.enable_google_drive_upload, features['disable-google-drive-upload']);
-    if (args.enable_onedrive_upload !== undefined) features['disable-onedrive-upload'] = setDisableState(args.enable_onedrive_upload, features['disable-onedrive-upload']);
-    if (args.enable_talk_to_content !== undefined) features['disable-talk-to-content'] = setDisableState(args.enable_talk_to_content, features['disable-talk-to-content']);
-    if (args.enable_suggested_highlights !== undefined) features['personalization-suggested-highlights'] = setState(args.enable_suggested_highlights, features['personalization-suggested-highlights']);
-    if (args.enable_people_search_org_chart !== undefined) features['people-search-org-chart'] = setState(args.enable_people_search_org_chart, features['people-search-org-chart']);
-    if (args.enable_welcome_emails !== undefined) features['disable-welcome-emails'] = setDisableState(args.enable_welcome_emails, features['disable-welcome-emails']);
-    if (args.enable_projects !== undefined) features['disable-projects'] = setDisableState(args.enable_projects, features['disable-projects']);
-    if (args.enable_mobile_app_access !== undefined) features['mobile-app-access'] = setState(args.enable_mobile_app_access, features['mobile-app-access']);
-    if (args.enable_multi_agent_orchestration !== undefined) features['disable-multi-agent-orchestration'] = setDisableState(args.enable_multi_agent_orchestration, features['disable-multi-agent-orchestration']);
-    if (args.enable_single_agent_orchestration !== undefined) features['disable-single-agent-orchestration'] = setDisableState(args.enable_single_agent_orchestration, features['disable-single-agent-orchestration']);
-    if (args.enable_bi_directional_audio !== undefined) features['bi-directional-audio'] = setState(args.enable_bi_directional_audio, features['bi-directional-audio']);
-    if (args.enable_cross_product_intelligence !== undefined) features['cross-product-intelligence'] = setState(args.enable_cross_product_intelligence, features['cross-product-intelligence']);
-    if (args.enable_cross_domain_documents !== undefined) {
-      delete features['cross-domain-documents'];
-      delete features['disable-cross-domain-documents'];
-      features['include-cross-domain-documents'] = setState(args.enable_cross_domain_documents, features['include-cross-domain-documents']);
+    if (current['*'] !== undefined) {
+      // The API ignores every other key while the wildcard is present.
+      throw new Error(`Engine "${engineId}" has the wildcard feature key "*" set (${current['*']}); individual toggles are ignored until it is removed.`);
     }
-    }
-
-    const resPatch = await fetch(`${baseUrl}?updateMask=features`, {
-      method: 'PATCH',
-      headers: restHeaders,
-      body: JSON.stringify({ features })
+    const updated = await patchFeatures(applyFeatureUpdates(current, args));
+    return textResult({
+      status: 'SUCCESS',
+      message: `Feature management settings updated for app "${engineId}".`,
+      features: describeFeatures(updated.features || {})
     });
-    const updated = await resPatch.json();
-    const updatedFeatures = updated.features || {};
+  }
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            status: 'SUCCESS',
-            message: `Feature management settings updated for app "${engineId}".`,
-            features: mapFeaturesToResponse(updatedFeatures)
-          }, null, 2)
-        }
-      ]
-    };
+  if (action === 'cleanup_invalid_keys') {
+    const invalid = findInvalidFeatureKeys(current);
+    const removed = Object.fromEntries(invalid.map(k => [k, current[k]]));
+    if (args.dry_run === false && invalid.length > 0) {
+      const cleaned = Object.fromEntries(Object.entries(current).filter(([k]) => !invalid.includes(k)));
+      await patchFeatures(cleaned);
+    }
+    return textResult({
+      status: 'SUCCESS',
+      dry_run: args.dry_run !== false,
+      engine_id: engineId,
+      invalid_keys: removed,
+      message: invalid.length === 0
+        ? 'No invalid feature keys found.'
+        : (args.dry_run === false ? `Removed ${invalid.length} invalid feature keys.` : `Found ${invalid.length} invalid feature keys. Re-run with dry_run=false to remove them.`)
+    });
   }
 
   throw new Error(`Unsupported action "${action}" for gemini_enterprise_manage_features.`);
