@@ -42,6 +42,12 @@ test('rejects unverified emails and disallowed domains', async () => {
   await assert.rejects(verifierWith(validInfo, { allowedEmailDomains: ['other.com'] }).verifier.verifyAccessToken('b'), /domain/);
 });
 
+test('tokeninfo string booleans: "false" must be rejected, "true" accepted', async () => {
+  await assert.rejects(verifierWith({ ...validInfo, email_verified: 'false' }).verifier.verifyAccessToken('s1'), /email/);
+  const auth = await verifierWith({ ...validInfo, email_verified: 'true' }).verifier.verifyAccessToken('s2');
+  assert.equal(auth.extra.email, 'admin@acme.com');
+});
+
 test('rejects expired tokens and tokeninfo failures', async () => {
   await assert.rejects(verifierWith({ ...validInfo, expiry_date: Date.now() - 1000 }).verifier.verifyAccessToken('c'), /expired/);
   await assert.rejects(verifierWith(() => { throw new Error('invalid_token'); }).verifier.verifyAccessToken('d'), /Invalid/);

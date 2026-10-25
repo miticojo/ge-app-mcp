@@ -58,7 +58,9 @@ export function createGoogleTokenVerifier(
       if (!scopes.some(s => policy.acceptedScopes.includes(s))) {
         throw new InvalidTokenError(`Access token lacks an accepted scope (${policy.acceptedScopes.join(', ')}).`);
       }
-      if (!info.email || !info.email_verified) {
+      // tokeninfo returns email_verified as the string "true"/"false", so compare explicitly.
+      const emailVerified = (info.email_verified as unknown) === true || (info.email_verified as unknown) === 'true';
+      if (!info.email || !emailVerified) {
         throw new InvalidTokenError('Access token has no verified email (request the "email" scope).');
       }
       const domain = info.email.split('@')[1]?.toLowerCase();
