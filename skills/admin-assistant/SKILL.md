@@ -15,6 +15,9 @@ retrying. `USER_PROJECT_DENIED` means they also need `roles/serviceusage.service
 
 ## 1. Always inspect before you change
 - Read the current state first (`get`, `list`, `get-iam`) and summarize it.
+- Call `gemini_enterprise_manage_*` and `gemini_enterprise_configure_connector` tools **one at a time
+  (sequentially)** when running inside Gemini Enterprise: tools that require user confirmation cannot run
+  in parallel.
 - Report `SERVER_DEFAULT` values as "not overridden by an admin", not as on/off.
 - Long operations return `status: RUNNING` and an `operation_name`: poll it with
   `gemini_enterprise_get_operation` until `DONE` before the next dependent step.

@@ -213,10 +213,14 @@ The image is built from the `Dockerfile` (distroless, non-root, `MCP_TRANSPORT=h
 | Client ID / Secret | from step 2 |
 | PKCE | enabled |
 | Scopes | `openid email https://www.googleapis.com/auth/discoveryengine.readwrite` |
+| MCP Server Description *(Advanced options)* | Short description of the server's capabilities so the assistant knows when to route requests to it |
 
-Then *Actions → Reload custom actions*, enable the actions you need, and connect the data store to the app
-used by your administrators. Read-only tools (`search`, `ask`, `get_document`, `get_operation`) run without a
-confirmation prompt; every other action asks the user to confirm.
+Then open *Actions → Reload custom actions*, select all discovered actions, click *Enable actions*, and connect the
+data store to the app used by your administrators (*Connected data stores → Add existing data stores*). On first use
+in the Gemini Enterprise web app, each administrator opens *Sources / Connectors* in the chat bar and clicks
+**Authorize** next to the connector to complete per-user OAuth consent. Read-only tools (`search`, `ask`,
+`get_document`, `get_operation`) run without a confirmation prompt; every other action shows a `Review` card
+(**Send** / **Cancel**) and runs sequentially.
 
 **5. Grant roles to administrators**: their usual Discovery Engine roles plus
 `roles/serviceusage.serviceUsageConsumer` on the project (the server sends `x-goog-user-project`).
@@ -229,8 +233,9 @@ confirmation prompt; every other action asks the user to confirm.
 > `gemini_enterprise_manage_skills` needs the `cloud-platform` scope and is hidden when only
 > `discoveryengine.readwrite` is accepted. See [ADR-0003](docs/adr/0003-remote-http-transport-with-end-user-oauth.md).
 
-The distributed skills can be uploaded to the Gemini Enterprise web app (*Skills → Upload*, Markdown file) and
-shared with other administrators.
+The distributed skills can be imported into the Gemini Enterprise web app (*Skills → Add skill → Upload skill*,
+select `SKILL.md` → **Import**), invoked in chat with `/<skill-name>` (e.g. `/admin-assistant`), and shared with
+other administrators.
 
 ---
 

@@ -9,7 +9,9 @@ metadata:
 # Agent & Skill Architect
 
 ## 1. Understand what exists
-- `gemini_enterprise_manage_agents` `list`, then `get` for details. Agent types:
+- `gemini_enterprise_manage_agents` `list`, then `get` for details (call `gemini_enterprise_manage_*` tools
+  sequentially one at a time inside Gemini Enterprise, since confirmation-gated tools cannot run in parallel).
+  Agent types:
   `lowCodeAgentDefinition` (Agent Designer), `a2aAgentDefinition`, `adkAgentDefinition`,
   `managedAgentDefinition` (Google-made, read-only: never modify or recreate these).
 - For low-code agents, read the whole `nodes` array: `root_agent` routes to the nodes listed in
