@@ -9,6 +9,7 @@ import {
 } from '@google-cloud/discoveryengine';
 import { config } from '../config.js';
 import { applyFeatureUpdates, describeFeatures, findInvalidFeatureKeys, featureToggleSchemaProperties } from '../domain/engineFeatures.js';
+import { applyModelUpdates, describeModels, modelSchemaProperties } from '../domain/engineModels.js';
 import { getAuthHeaders, gapicClientOptions, discoveryEngineHost, discoveryEngineBaseUrl, fetchJson } from '../gcp.js';
 
 // Define MCP Tool schemas
@@ -418,25 +419,22 @@ export const adminTools: any[] = [
   },
   {
     name: 'gemini_enterprise_manage_models',
-    description: 'Manage Gemini Enterprise Model Availability toggles (e.g. Gemini 2.5 pro, Gemini 3.1 Pro, Gemini 3.5 Flash, Gemini 3.6 Flash).',
+    description: 'Get or update Gemini Enterprise model availability (Engine.modelConfigs). Anthropic models also require pay-as-you-go overages.',
     inputSchema: {
       type: 'object',
       properties: {
-        action: {
-          type: 'string',
-          enum: ['get', 'update'],
-          description: 'The action to perform: get or update.'
+        action: { type: 'string', enum: ['get', 'update'], description: 'get or update.' },
+        project_id: { type: 'string', description: 'Optional. Google Cloud Project ID.' },
+        location: { type: 'string', description: 'Optional. Google Cloud Region.' },
+        engine_id: { type: 'string', description: 'The target App / Engine ID.' },
+        ...modelSchemaProperties(),
+        model_configs: {
+          type: 'object',
+          additionalProperties: { type: 'boolean' },
+          description: 'Optional. Map of exact model id to enabled flag, for models without a shortcut (e.g. {"gemini-3.8-flash": true}).'
         },
-        engine_id: {
-          type: 'string',
-          description: 'The target App / Engine ID (e.g., "tes" or "assistente-bandi-e-appalti").'
-        },
-        enable_gemini_2_5_pro: { type: 'boolean', description: 'Enable or disable Gemini 2.5 pro.' },
-        enable_gemini_3_1_pro: { type: 'boolean', description: 'Enable or disable Gemini 3.1 Pro.' },
-        enable_gemini_3_5_flash: { type: 'boolean', description: 'Enable or disable Gemini 3.5 Flash.' },
-        enable_gemini_3_6_flash: { type: 'boolean', description: 'Enable or disable Gemini 3.6 Flash.' },
-        enable_all_models: { type: 'boolean', description: 'Convenience flag to enable all Gemini models at once.' },
-        disable_all_models: { type: 'boolean', description: 'Convenience flag to disable all Gemini models at once.' }
+        enable_all_models: { type: 'boolean', description: 'Enable every model already configured on the engine.' },
+        disable_all_models: { type: 'boolean', description: 'Disable every model already configured on the engine.' }
       },
       required: ['action', 'engine_id']
     }
@@ -1999,89 +1997,32 @@ async function manageFeatures(args: any): Promise<any> {
 
 // 10b. Model Availability Management
 async function manageModels(args: any): Promise<any> {
-  const { projectId, location, options } = getGcpParams(args);
+  const { projectId, location } = getGcpParams(args);
   const engineId = args.engine_id;
-  const baseUrl = `${discoveryEngineBaseUrl(location, 'v1alpha')}/projects/${projectId}/locations/${location}/collections/${config.collectionId}/engines/${engineId}`;
+  if (!engineId) throw new Error('engine_id is required.');
   const action = args.action;
+  const headers = await getAuthHeaders(projectId);
+  const baseUrl = `${discoveryEngineBaseUrl(location, 'v1alpha')}/projects/${projectId}/locations/${location}/collections/${config.collectionId}/engines/${engineId}`;
 
-  const restHeaders = await getAuthHeaders(projectId);
-
-  const mapModelsToResponse = (m: Record<string, string>) => ({
-    enable_gemini_2_5_pro: m['gemini-2.5-pro'] === 'MODEL_ENABLED',
-    enable_gemini_3_1_pro: m['gemini-3.1-pro-preview'] === 'MODEL_ENABLED',
-    enable_gemini_3_5_flash: m['gemini-3-flash-preview'] === 'MODEL_ENABLED',
-    enable_gemini_3_6_flash: m['gemini-3.1-flash-image-preview'] === 'MODEL_ENABLED' || m['gemini-3.1-flash-image'] === 'MODEL_ENABLED'
-  });
+  const existing = await fetchJson(baseUrl, { headers }, 'Get engine');
+  const current: Record<string, string> = existing.modelConfigs || {};
 
   if (action === 'get') {
-    const res = await fetch(baseUrl, { headers: restHeaders });
-    const data = await res.json();
-    const modelConfigs = data.modelConfigs || {};
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            status: 'SUCCESS',
-            engine_id: engineId,
-            model_availability: mapModelsToResponse(modelConfigs),
-            raw_model_configs: modelConfigs
-          }, null, 2)
-        }
-      ]
-    };
+    return textResult({ status: 'SUCCESS', engine_id: engineId, ...describeModels(current) });
   }
 
   if (action === 'update') {
-    const resGet = await fetch(baseUrl, { headers: restHeaders });
-    const existing = await resGet.json();
-    const modelConfigs = existing.modelConfigs || {};
-
-    const setState = (val: boolean | undefined, current: string) => {
-      if (val === undefined) return current || 'MODEL_ENABLED';
-      return val ? 'MODEL_ENABLED' : 'MODEL_DISABLED';
-    };
-
-    const modelKeys = [
-      'gemini-2.5-pro', 'gemini-3.1-pro-preview', 'gemini-3-flash-preview',
-      'gemini-3.6-flash', 'gemini-3.6-flash-preview', 'gemini-3.6-flash-001',
-      'gemini-3.6', 'gemini-3.6-flash-image', 'gemini-3.6-flash-image-preview',
-      'gemini-3-6-flash', 'gemini-3-6-flash-preview'
-    ];
-    if (args.enable_all_models === true) {
-      for (const k of modelKeys) modelConfigs[k] = 'MODEL_ENABLED';
-    } else if (args.disable_all_models === true) {
-      for (const k of modelKeys) modelConfigs[k] = 'MODEL_DISABLED';
-    } else {
-      if (args.enable_gemini_2_5_pro !== undefined) modelConfigs['gemini-2.5-pro'] = setState(args.enable_gemini_2_5_pro, modelConfigs['gemini-2.5-pro']);
-      if (args.enable_gemini_3_1_pro !== undefined) modelConfigs['gemini-3.1-pro-preview'] = setState(args.enable_gemini_3_1_pro, modelConfigs['gemini-3.1-pro-preview']);
-      if (args.enable_gemini_3_5_flash !== undefined) modelConfigs['gemini-3-flash-preview'] = setState(args.enable_gemini_3_5_flash, modelConfigs['gemini-3-flash-preview']);
-      if (args.enable_gemini_3_6_flash !== undefined) {
-        for (const k of modelKeys.slice(3)) modelConfigs[k] = setState(args.enable_gemini_3_6_flash, modelConfigs[k]);
-      }
-    }
-
-    const resPatch = await fetch(`${baseUrl}?updateMask=modelConfigs`, {
+    const modelConfigs = applyModelUpdates(current, args);
+    const updated = await fetchJson(`${baseUrl}?updateMask=modelConfigs`, {
       method: 'PATCH',
-      headers: restHeaders,
+      headers,
       body: JSON.stringify({ modelConfigs })
+    }, 'Update engine model configs');
+    return textResult({
+      status: 'SUCCESS',
+      message: `Model availability settings updated for app "${engineId}".`,
+      ...describeModels(updated.modelConfigs || {})
     });
-    const updated = await resPatch.json();
-    const updatedModels = updated.modelConfigs || {};
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            status: 'SUCCESS',
-            message: `Model availability settings updated for app "${engineId}".`,
-            model_availability: mapModelsToResponse(updatedModels),
-            raw_model_configs: updatedModels
-          }, null, 2)
-        }
-      ]
-    };
   }
 
   throw new Error(`Unsupported action "${action}" for gemini_enterprise_manage_models.`);
