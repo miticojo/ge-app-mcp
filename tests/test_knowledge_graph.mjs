@@ -7,7 +7,11 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const serverPath = join(__dirname, '../build/index.js');
 
-const targetEngineId = process.env.TARGET_ENGINE_ID || 'tes'; // Test engine "tes"
+const targetEngineId = process.env.TARGET_ENGINE_ID;
+if (!targetEngineId) {
+  console.error('TARGET_ENGINE_ID is required (no default: test engines change over time).');
+  process.exit(1);
+}
 
 const transport = new StdioClientTransport({
   command: 'node',

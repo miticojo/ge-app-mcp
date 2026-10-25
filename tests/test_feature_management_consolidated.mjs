@@ -1,85 +1,70 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import assert from 'node:assert/strict';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+// Live, reversible test of feature toggles and model availability: flips one explicitly
+// configured toggle and one configured model, then restores their original values.
+const __dirname = dirname(fileURLToPath(import.meta.url));
 const serverPath = join(__dirname, '../build/index.js');
 
-const targetEngineId = process.env.TARGET_ENGINE_ID || 'tes'; // Test sandbox engine "tes"
+const targetEngineId = process.env.TARGET_ENGINE_ID;
+if (!targetEngineId) {
+  console.error('TARGET_ENGINE_ID is required (no default: test engines change over time).');
+  process.exit(1);
+}
 
 const transport = new StdioClientTransport({
   command: 'node',
   args: [serverPath],
   env: {
     ...process.env,
-    PATH: `/opt/homebrew/bin:${process.env.PATH}`,
     GCP_PROJECT: process.env.GCP_PROJECT || 'giorgioc-cloud-apps',
     GCP_LOCATION: process.env.GCP_LOCATION || 'global',
-    GCP_COLLECTION: process.env.GCP_COLLECTION || 'default_collection',
-    GOOGLE_CLOUD_QUOTA_PROJECT: process.env.GOOGLE_CLOUD_QUOTA_PROJECT || 'giorgioc-cloud-apps',
-    MCP_SCOPES: process.env.MCP_SCOPES || 'search,admin,billing',
+    MCP_SCOPES: 'admin'
   }
 });
+const client = new Client({ name: 'test-feature-management', version: '1.0.0' }, { capabilities: {} });
 
-const client = new Client({
-  name: 'test-feature-management-consolidated',
-  version: '1.0.0'
-}, {
-  capabilities: {}
-});
+async function call(name, args) {
+  const res = await client.callTool({ name, arguments: { engine_id: targetEngineId, ...args } });
+  if (res.isError) throw new Error(res.content[0].text);
+  return JSON.parse(res.content[0].text);
+}
 
 async function run() {
-  console.log(`🌌 Starting Consolidated Feature Management & Model Availability Test Suite on app "${targetEngineId}"...\n`);
+  console.log(`🌌 Feature & model live test on app "${targetEngineId}"`);
   await client.connect(transport);
 
-  console.log('--- 1. ENABLING ALL GEMINI MODELS (enable_all_models: true) ---');
-  const resEnableModels = await client.callTool({
-    name: 'gemini_enterprise_manage_models',
-    arguments: { action: 'update', engine_id: targetEngineId, enable_all_models: true }
-  });
-  console.log('✅ Result:', JSON.parse(resEnableModels.content[0].text).message);
+  // Features: pick a toggle with an explicit value so it can be restored exactly.
+  const { features } = await call('gemini_enterprise_manage_features', { action: 'get' });
+  console.log(`✓ get: ${features.invalid_keys.length} invalid legacy keys on the engine`);
+  const [toggle, original] = Object.entries(features.toggles).find(([, v]) => typeof v === 'boolean') || [];
+  assert.ok(toggle, 'engine has no explicitly configured toggle to flip');
+  const flipped = await call('gemini_enterprise_manage_features', { action: 'update', [toggle]: !original });
+  assert.equal(flipped.features.toggles[toggle], !original);
+  const restored = await call('gemini_enterprise_manage_features', { action: 'update', [toggle]: original });
+  assert.equal(restored.features.toggles[toggle], original);
+  console.log(`✓ ${toggle} flipped and restored to ${original}`);
 
-  console.log('\n--- 2. ENABLING ALL 26 CORE FEATURES + CROSS DOMAIN (enable_all_features: true) ---');
-  const resEnableFeatures = await client.callTool({
-    name: 'gemini_enterprise_manage_features',
-    arguments: { action: 'update', engine_id: targetEngineId, enable_all_features: true }
-  });
-  console.log('✅ Result:', JSON.parse(resEnableFeatures.content[0].text).message);
-
-  console.log('\n--- 3. VERIFYING MODELS & FEATURES GET ACTION ---');
-  const resGetModels = await client.callTool({
-    name: 'gemini_enterprise_manage_models',
-    arguments: { action: 'get', engine_id: targetEngineId }
-  });
-  const models = JSON.parse(resGetModels.content[0].text).model_availability;
-  console.log('Models Enabled Count:', Object.values(models).filter(v => v === true).length, '/', Object.keys(models).length);
-
-  const resGetFeatures = await client.callTool({
-    name: 'gemini_enterprise_manage_features',
-    arguments: { action: 'get', engine_id: targetEngineId }
-  });
-  const features = JSON.parse(resGetFeatures.content[0].text).features;
-  console.log('Features Enabled Count:', Object.values(features).filter(v => v === true).length, '/', Object.keys(features).length);
-
-  console.log('\n--- 4. RESTORING / DISABLING ALL AS REQUESTED BY USER (disable_all_models & disable_all_features) ---');
-  await client.callTool({
-    name: 'gemini_enterprise_manage_models',
-    arguments: { action: 'update', engine_id: targetEngineId, disable_all_models: true }
-  });
-  await client.callTool({
-    name: 'gemini_enterprise_manage_features',
-    arguments: { action: 'update', engine_id: targetEngineId, disable_all_features: true }
-  });
-  console.log('✅ Successfully disabled all models and features after test completion.');
+  // Models: same approach on an explicitly configured model.
+  const models = await call('gemini_enterprise_manage_models', { action: 'get' });
+  const [modelId, state] = Object.entries(models.raw_model_configs)[0] || [];
+  assert.ok(modelId, 'engine has no configured model to flip');
+  const wasEnabled = state === 'MODEL_ENABLED';
+  const m1 = await call('gemini_enterprise_manage_models', { action: 'update', model_configs: { [modelId]: !wasEnabled } });
+  assert.equal(m1.raw_model_configs[modelId], wasEnabled ? 'MODEL_DISABLED' : 'MODEL_ENABLED');
+  const m2 = await call('gemini_enterprise_manage_models', { action: 'update', model_configs: { [modelId]: wasEnabled } });
+  assert.equal(m2.raw_model_configs[modelId], state);
+  console.log(`✓ ${modelId} flipped and restored to ${state}`);
 
   await client.close();
-  console.log('\n🎉 Consolidated Test Suite Completed Successfully!');
+  console.log('\n🎉 Feature & model live test passed');
   process.exit(0);
 }
 
 run().catch((err) => {
-  console.error('❌ Test Suite Error:', err);
+  console.error('❌ Test Error:', err.message);
   process.exit(1);
 });

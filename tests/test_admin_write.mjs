@@ -37,29 +37,22 @@ async function run() {
   console.log(`Targeting DataStore: "${datastoreId}"`);
   console.log(`Generated Test Control ID: "${testControlId}"\n`);
 
-  // STEP 1: Test SaaS Connector Configuration (Simulation Tool)
+  // STEP 1: Read a real data connector (read-only; the former simulated connector flow was removed)
   try {
-    console.log('--- [1/4] Configuring SaaS Jira Connector (Mock Flow) ---');
-    const response = await client.callTool({
-      name: 'gemini_enterprise_configure_connector',
-      arguments: {
-        datastore_id: datastoreId,
-        connector_type: 'jira',
-        config_payload: {
-          siteUrl: 'https://giorgioc-altostrat.atlassian.net',
-          syncInterval: '24h',
-          auth: {
-            username: 'admin@giorgioc.altostrat.com',
-            apiToken: 'mcp-api-token-secret-placeholder'
-          }
-        }
-      }
-    });
-    
-    console.log('SaaS Connector response:');
-    console.log(response.content[0].text);
+    const collectionId = process.env.TARGET_CONNECTOR_COLLECTION;
+    if (!collectionId) {
+      console.log('--- [1/4] Skipping connector read: set TARGET_CONNECTOR_COLLECTION to a connector collection ID ---');
+    } else {
+      console.log(`--- [1/4] Reading data connector of collection "${collectionId}" ---`);
+      const response = await client.callTool({
+        name: 'gemini_enterprise_configure_connector',
+        arguments: { action: 'get', collection_id: collectionId }
+      });
+      if (response.isError) throw new Error(response.content[0].text);
+      console.log('✅ Connector state:', JSON.parse(response.content[0].text).data_connector.state);
+    }
   } catch (err) {
-    console.error('❌ SaaS Connector tool call failed:', err.message || err);
+    console.error('❌ Connector read failed:', err.message || err);
   }
 
   // STEP 2: Create a Serving Control (Live gRPC Write)
