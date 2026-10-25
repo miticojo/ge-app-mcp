@@ -27,8 +27,12 @@ ge-app-mcp/
 ├── package.json           # Project manifests and build scripts
 ├── tsconfig.json          # TypeScript compiler configuration (Target: ES2022 / Module: NodeNext)
 ├── src/
-│   ├── index.ts           # MCP Server entrypoint (initializes transport, registers and routes tools)
+│   ├── index.ts           # MCP Server entrypoint (stdio or HTTP transport, registers and routes tools)
 │   ├── config.ts          # Environment variables and dynamic scope parser
+│   ├── gcp.ts             # Request-scoped credentials (ADC in stdio, end-user token over HTTP) and REST helpers
+│   ├── http.ts            # Stateless Streamable HTTP transport and Google token verification
+│   ├── annotations.ts     # MCP tool annotations (readOnlyHint / destructiveHint)
+│   ├── domain/            # Pure, unit-tested domain logic (features, models, assistant, licensing, citations)
 │   └── tools/             # Segmented tool implementation modules
 │       ├── search.ts      # Search and Conversational RAG tools (Data Plane)
 │       ├── admin.ts       # Datastore, schema, web crawler, and control tools (Control Plane)
@@ -44,21 +48,24 @@ ge-app-mcp/
 | `gemini_enterprise_ask` | `tools/search.ts` | Execute Conversational Search RAG. | `ConversationalSearchServiceClient` |
 | `gemini_enterprise_get_document`| `tools/search.ts` | Retrieve full document content & metadata. | `DocumentServiceClient` |
 | `gemini_enterprise_manage_apps` | `tools/admin.ts` | Manage application configurations (CRUD & IAM). | `EngineServiceClient` / REST |
-| `gemini_enterprise_manage_datastore`| `tools/admin.ts` | Instantiate or delete datastores. | `DataStoreServiceClient` |
+| `gemini_enterprise_manage_datastore`| `tools/admin.ts` | Data store CRUD, data store/collection IAM, project resource access control. | `DataStoreServiceClient` / REST (`v1alpha`) |
 | `gemini_enterprise_manage_documents`| `tools/admin.ts` | Async document import or purge. | `DocumentServiceClient` |
 | `gemini_enterprise_manage_schema`| `tools/admin.ts` | Create or update datastore JSON schemas.| `SchemaServiceClient` |
 | `gemini_enterprise_manage_controls`| `tools/admin.ts` | Sync synonym, boost, and filter controls. | `ControlServiceClient` |
-| `gemini_enterprise_manage_agents`  | `tools/admin.ts` | Create, list, delete, and update native Discovery Engine Agents. | `AgentService` REST API (`v1alpha`) |
-| `gemini_enterprise_manage_skills`  | `tools/admin.ts` | Manage Vertex AI platform Skills inside the Skill Registry. | REST API (`v1beta1`) |
-| `gemini_enterprise_manage_features`| `tools/admin.ts` | Manage 27 Web App end-user feature toggles. | REST API (`v1alpha`) |
-| `gemini_enterprise_manage_models`  | `tools/admin.ts` | Manage Gemini model availability toggles. | REST API (`v1alpha`) |
+| `gemini_enterprise_manage_agents`  | `tools/admin.ts` | Create, list, get, update, delete A2A, low-code and ADK agents (sharing scope, starter prompts). | `AgentService` REST API (`v1alpha`) |
+| `gemini_enterprise_manage_skills`  | `tools/admin.ts` | Vertex AI Skill Registry: create, list, get, retrieve, revisions, patch, delete. | REST API (`v1beta1`) |
+| `gemini_enterprise_manage_features`| `tools/admin.ts` | All 38 Engine.features toggles (`src/domain/engineFeatures.ts`) + cleanup of invalid keys. | REST API (`v1alpha`) |
+| `gemini_enterprise_manage_models`  | `tools/admin.ts` | Model availability: verified shortcuts + generic `model_configs`. | REST API (`v1alpha`) |
 | `gemini_enterprise_manage_search_ui`| `tools/admin.ts` | Manage search UI, autocomplete, and shortcuts. | REST API (`v1alpha`) |
-| `gemini_enterprise_manage_assistant`| `tools/admin.ts` | Manage assistant prompts, grounding, and instructions. | REST API (`v1alpha`) |
+| `gemini_enterprise_manage_assistant`| `tools/admin.ts` | Real `default_assistant` governance + `Engine.sessionConfig` retention (ADR-0001). | REST API (`v1alpha`) |
 | `gemini_enterprise_manage_observability`| `tools/admin.ts` | Manage OpenTelemetry and prompt logging. | REST API (`v1alpha`) |
 | `gemini_enterprise_manage_knowledge_graph`| `tools/admin.ts` | Manage Cloud and Private Knowledge Graphs. | REST API (`v1alpha`) |
 | `gemini_enterprise_manage_target_sites`| `tools/admin.ts` | Administer crawled website URI patterns.| `SiteSearchEngineServiceClient` / REST |
-| `gemini_enterprise_configure_connector`| `tools/admin.ts` | SaaS connectors simulation flow. | Simulated Connector Lifecycle |
-| `gemini_enterprise_manage_licenses`| `tools/billing.ts`| Live seat assignments & licensing pools. | Global REST `licenseConfigs` & `userLicenses` |
+| `gemini_enterprise_configure_connector`| `tools/admin.ts` | DataConnector get/setup/runs and custom MCP `citation_mappings`. | REST API (`v1` / `v1alpha`) |
+| `gemini_enterprise_get_operation`| `tools/admin.ts` | Poll long-running operations returned by other tools (read-only). | REST `operations.get` |
+| `gemini_enterprise_inspect` | `tools/admin.ts` | Dedicated read-only control-plane inspection (`readOnlyHint: true`, parallel & confirmation-free in GE). | Discovery Engine / Vertex AI read endpoints |
+| `gemini_enterprise_inspect_licenses`| `tools/billing.ts`| Dedicated read-only license pools & usage inspection (`readOnlyHint: true`). | Global REST `licenseConfigs`, `userLicenses`, `licenseConfigsUsageStats` |
+| `gemini_enterprise_manage_licenses`| `tools/billing.ts`| License pools, usage stats, assign/unassign. | Global REST `licenseConfigs`, `userLicenses`, `licenseConfigsUsageStats` |
 
 ---
 
@@ -81,6 +88,14 @@ To ensure **Least Privilege**, the server implements environment-driven dynamic 
 > [!WARNING]
 > **AI Coding Rule**: Never bypass this check or hardcode tools outside their designated scopes. When adding or modifying tools, ensure they are strictly mapped to their appropriate scope blocks in `src/index.ts`.
 
+Every tool also needs an entry in `src/annotations.ts` (enforced by `tests/unit/annotations.test.mjs`). Only pure reads may set `readOnlyHint: true`: Gemini Enterprise skips user confirmation for them.
+
+### Transports and identity (ADR-0003)
+- **stdio** (default): local harnesses; Google calls use the local ADC identity.
+- **http** (`MCP_TRANSPORT=http`): stateless Streamable HTTP for Cloud Run / Gemini Enterprise. Each request is verified (`ALLOWED_OAUTH_CLIENT_IDS`, accepted scopes, verified email) and executed with the **caller's** token through `runWithUserCredentials`.
+- Always obtain credentials via `getAuthHeaders()` / `gapicClientOptions()` from `src/gcp.ts`. Never create a `GoogleAuth` or a module-level client inside a tool: it would bypass the user's identity and, in HTTP mode, fail closed.
+- Long-running operations must use `settleGapicOperation()` / bounded polling and return `pendingOperationResult()` instead of blocking.
+
 ---
 
 ## 3. GCP REST & Client API Safeguards (CRITICAL)
@@ -93,6 +108,7 @@ In Node.js 18+, `GoogleAuth.getRequestHeaders()` can return a native iterable `H
 You **must** always use a polymorphic header copier that handles both iterables and plain objects:
 
 ```typescript
+// Canonical implementation: src/gcp.ts (adds the end-user token branch for HTTP mode).
 async function getAuthHeaders(projectId: string): Promise<Record<string, string>> {
   const auth = new GoogleAuth({
     scopes: ['https://www.googleapis.com/auth/cloud-platform']
@@ -226,6 +242,13 @@ As an AI Coding Agent, you must practice **Surgical Code Modifications** to pres
 The repository includes a suite of specialized test files to validate changes. **You must run these scripts to verify any modifications before concluding your task.**
 
 ### 🧪 The Test Suite
+
+0.  **Unit & HTTP transport tests (`tests/unit/*.test.mjs`, `node:test`)**:
+    Pure domain logic (feature keys and polarity, models, assistant mapping and legacy migration, licensing, citation mappings), annotation coverage, Google token verification, and the in-process Streamable HTTP server (401s, stateless serving, per-request credential isolation under concurrency). No GCP credentials needed; part of `npm test`.
+    ```bash
+    npm run test:unit
+    ```
+    Live suites that write to a real engine (`test_assistant_suite.mjs`, `test_feature_management_consolidated.mjs`, `test_knowledge_graph.mjs`) require `TARGET_ENGINE_ID` and restore every value they change.
 
 1.  **Handshake Validation (`test_mcp_client.mjs`)**:
     Launches the compiled server via stdio, executes an MCP `tools/list` handshake, and displays all registered tools.

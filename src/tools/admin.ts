@@ -7,8 +7,13 @@ import {
   SiteSearchEngineServiceClient,
   ServingConfigServiceClient
 } from '@google-cloud/discoveryengine';
-import { GoogleAuth } from 'google-auth-library';
 import { config } from '../config.js';
+import { applyFeatureUpdates, describeFeatures, findInvalidFeatureKeys, featureToggleSchemaProperties } from '../domain/engineFeatures.js';
+import { applyModelUpdates, describeModels, modelSchemaProperties } from '../domain/engineModels.js';
+import { buildAssistantPatch, describeAssistant, legacyToArgs, parseLegacyCompanyName } from '../domain/assistantConfig.js';
+import { validateCitationMappings } from '../domain/citationMappings.js';
+import { INSPECT_TARGETS, buildInspectCall } from '../domain/inspect.js';
+import { getAuthHeaders, gapicClientOptions, discoveryEngineHost, discoveryEngineBaseUrl, fetchJson } from '../gcp.js';
 
 // Define MCP Tool schemas
 export const adminTools: any[] = [
@@ -53,63 +58,50 @@ export const adminTools: any[] = [
   },
   {
     name: 'gemini_enterprise_manage_datastore',
-    description: 'Manage Gemini Enterprise DataStores. Supports create, list, and delete operations.',
+    description: 'Manage Gemini Enterprise data stores and resource-level IAM: list, get, create, delete, get-iam, set-iam (data store, or collection for multi-entity connectors), and set-resource-access-control (project-level filtering of data stores by IAM).',
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['create', 'list', 'delete'],
-          description: 'The action to perform: create, list, or delete.'
+          enum: ['list', 'get', 'create', 'delete', 'get-iam', 'set-iam', 'set-resource-access-control'],
+          description: 'The action to perform.'
         },
-        project_id: {
-          type: 'string',
-          description: 'Optional. Google Cloud Project ID (overrides default).'
-        },
-        location: {
-          type: 'string',
-          description: 'Optional. Google Cloud Region (overrides default).'
-        },
-        datastore_id: {
-          type: 'string',
-          description: 'ID of the DataStore. Required for create and delete.'
-        },
-        industry_vertical: {
-          type: 'string',
-          description: 'Optional. Industry vertical for the DataStore (e.g., "GENERIC", "MEDIA"). Defaults to "GENERIC".'
-        }
+        project_id: { type: 'string', description: 'Optional. Google Cloud Project ID (overrides default).' },
+        location: { type: 'string', description: 'Optional. Google Cloud Region (overrides default).' },
+        collection_id: { type: 'string', description: 'Optional. Collection ID (defaults to the configured collection). For get-iam/set-iam without datastore_id, targets the collection itself.' },
+        datastore_id: { type: 'string', description: 'ID of the data store. Required for get, create and delete.' },
+        industry_vertical: { type: 'string', description: 'Optional. Industry vertical for create: GENERIC (default) or MEDIA.' },
+        policy: { type: 'object', description: 'For set-iam. Full IAM policy including the etag returned by get-iam.' },
+        enabled: { type: 'boolean', description: 'For set-resource-access-control. true filters data stores and connectors shown to users by their resource-level IAM.' }
       },
       required: ['action']
     }
   },
   {
     name: 'gemini_enterprise_configure_connector',
-    description: 'Configure third-party data connectors (such as Jira, Salesforce, Confluence) for a DataStore.',
+    description: 'Manage the data connector of a connector collection (third-party SaaS or custom MCP data stores): get, setup, update_citation_mappings, list_runs, start_run.',
     inputSchema: {
       type: 'object',
       properties: {
-        datastore_id: {
+        action: {
           type: 'string',
-          description: 'The ID of the target DataStore.'
+          enum: ['get', 'setup', 'update_citation_mappings', 'list_runs', 'start_run'],
+          description: 'get, setup (create collection + connector, returns an operation), update_citation_mappings (custom MCP data stores), list_runs, or start_run.'
         },
-        connector_type: {
-          type: 'string',
-          description: 'The type of the third-party connector (e.g., "jira", "salesforce", "confluence", "slack").'
-        },
-        config_payload: {
+        collection_id: { type: 'string', description: 'ID of the connector collection. Required.' },
+        collection_display_name: { type: 'string', description: 'For setup. Human readable collection name.' },
+        data_connector: { type: 'object', description: 'For setup. DataConnector resource body (dataSource, params, entities, refreshInterval, ...).' },
+        citation_mappings: {
           type: 'object',
-          description: 'The credential and connection configuration payload for the connector.'
+          description: 'For update_citation_mappings. Tool name ("" = default) -> {items, uri, title, snippet, id} RFC 6901 JSON Pointers. Replaces the whole mapping.'
         },
-        project_id: {
-          type: 'string',
-          description: 'Optional. Google Cloud Project ID.'
-        },
-        location: {
-          type: 'string',
-          description: 'Optional. Google Cloud Region.'
-        }
+        entities: { type: 'array', items: { type: 'string' }, description: 'For start_run. Entities to sync (all if omitted).' },
+        force_refresh_content: { type: 'boolean', description: 'For start_run. Re-ingest all content.' },
+        project_id: { type: 'string', description: 'Optional. Google Cloud Project ID.' },
+        location: { type: 'string', description: 'Optional. Google Cloud Region.' }
       },
-      required: ['datastore_id', 'connector_type', 'config_payload']
+      required: ['action', 'collection_id']
     }
   },
   {
@@ -256,8 +248,8 @@ export const adminTools: any[] = [
       properties: {
         action: {
           type: 'string',
-          enum: ['create', 'list', 'delete', 'update'],
-          description: 'The administrative agent action to perform: create, list, delete, or update.'
+          enum: ['create', 'list', 'get', 'delete', 'update'],
+          description: 'The administrative agent action to perform: create, list, get, delete, or update.'
         },
         engine_id: {
           type: 'string',
@@ -277,16 +269,30 @@ export const adminTools: any[] = [
         },
         agent_type: {
           type: 'string',
-          enum: ['a2a', 'low-code'],
-          description: 'Optional. The type of agent to manage: "a2a" for Agent-to-Agent or "low-code" for native employee-made designer playbooks. Defaults to "a2a".'
+          enum: ['a2a', 'low-code', 'adk'],
+          description: 'Optional. "a2a" (external Agent-to-Agent endpoint), "low-code" (Agent Designer playbooks) or "adk" (agent deployed on Vertex AI Agent Engine). Defaults to "a2a".'
         },
         endpoint_url: {
           type: 'string',
-          description: 'The HTTPS URL endpoint where the custom A2A agent logic is hosted. Only used if agent_type is "a2a".'
+          description: 'The HTTPS URL endpoint where the custom A2A agent logic is hosted. Required for agent_type "a2a".'
+        },
+        reasoning_engine: {
+          type: 'string',
+          description: 'For agent_type "adk": projects/{project}/locations/{location}/reasoningEngines/{id}.'
+        },
+        sharing_scope: {
+          type: 'string',
+          enum: ['PRIVATE', 'RESTRICTED', 'ALL_USERS'],
+          description: 'Optional. Agent sharing scope. Sharing with specific principals and ownership transfer are Console-only.'
+        },
+        starter_prompts: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional. Starter prompt suggestions shown on the agent landing page.'
         },
         model: {
           type: 'string',
-          description: 'The LLM model used by low-code agents (e.g., "gemini-3.5-flash", "gemini-1.5-pro").'
+          description: 'The LLM model used by low-code agents (e.g., "gemini-3.5-flash").'
         },
         instruction: {
           type: 'string',
@@ -362,8 +368,8 @@ export const adminTools: any[] = [
       properties: {
         action: {
           type: 'string',
-          enum: ['create', 'list', 'delete', 'patch'],
-          description: 'The administrative skill action to perform: create, list, delete, or patch.'
+          enum: ['create', 'list', 'get', 'retrieve', 'list_revisions', 'delete', 'patch'],
+          description: 'create, list, get, retrieve (semantic lookup by query), list_revisions, delete, or patch. create/patch/delete return an operation: poll it with gemini_enterprise_get_operation before changing the skill again.'
         },
         skill_id: {
           type: 'string',
@@ -376,6 +382,14 @@ export const adminTools: any[] = [
         description: {
           type: 'string',
           description: 'A detailed description of what the skill does.'
+        },
+        query: {
+          type: 'string',
+          description: 'For retrieve. Natural language query used to find relevant skills.'
+        },
+        top_k: {
+          type: 'number',
+          description: 'For retrieve. Maximum number of skills to return.'
         },
         zipped_filesystem: {
           type: 'string',
@@ -395,105 +409,44 @@ export const adminTools: any[] = [
   },
   {
     name: 'gemini_enterprise_manage_features',
-    description: 'Manage Gemini Enterprise feature toggles (Agent Gallery, Agent Designer, Prompt Gallery, Model Selector, NotebookLM, Session Sharing, Memory). Supports get and update operations.',
+    description: 'Get or update Gemini Enterprise web app feature toggles (Engine.features), or remove invalid legacy keys stored on the engine.',
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['get', 'update'],
-          description: 'The action to perform: get or update feature management settings.'
+          enum: ['get', 'update', 'cleanup_invalid_keys'],
+          description: 'get, update, or cleanup_invalid_keys (removes keys not supported by the API; dry run unless dry_run is false).'
         },
-        project_id: {
-          type: 'string',
-          description: 'Optional. Google Cloud Project ID.'
-        },
-        location: {
-          type: 'string',
-          description: 'Optional. Google Cloud Region.'
-        },
-        engine_id: {
-          type: 'string',
-          description: 'ID of the app/engine. Required.'
-        },
-        enable_agent_gallery: {
-          type: 'boolean',
-          description: 'Enable or disable the Agent Gallery feature.'
-        },
-        enable_agent_designer: {
-          type: 'boolean',
-          description: 'Enable or disable the Agent Designer feature.'
-        },
-        enable_prompt_gallery: {
-          type: 'boolean',
-          description: 'Enable or disable the Prompt Gallery feature.'
-        },
-        enable_model_selector: {
-          type: 'boolean',
-          description: 'Enable or disable the Model Selector feature.'
-        },
-        enable_notebook_lm: {
-          type: 'boolean',
-          description: 'Enable or disable NotebookLM integration.'
-        },
-        enable_session_sharing: {
-          type: 'boolean',
-          description: 'Enable or disable Session Sharing.'
-        },
-        enable_memory: {
-          type: 'boolean',
-          description: 'Enable or disable long-term Memory & Personalization.'
-        },
-        enable_canvas: {
-          type: 'boolean',
-          description: 'Enable or disable the Canvas feature.'
-        },
-        enable_skills: { type: 'boolean', description: 'Enable or disable Skills feature.' },
-        enable_image_generation: { type: 'boolean', description: 'Enable or disable Image Generation.' },
-        enable_video_generation: { type: 'boolean', description: 'Enable or disable Video Generation.' },
-        enable_agent_sharing: { type: 'boolean', description: 'Enable or disable Agent Sharing.' },
-        enable_agent_sharing_without_approval: { type: 'boolean', description: 'Enable Agent Sharing without Admin Approval.' },
-        enable_end_user_sharing_with_groups: { type: 'boolean', description: 'Enable End-user Sharing with Groups.' },
-        enable_google_drive_upload: { type: 'boolean', description: 'Enable or disable Google Drive Upload.' },
-        enable_onedrive_upload: { type: 'boolean', description: 'Enable or disable OneDrive Upload.' },
-        enable_talk_to_content: { type: 'boolean', description: 'Enable or disable Talk to Content.' },
-        enable_suggested_highlights: { type: 'boolean', description: 'Enable or disable Suggested Highlights.' },
-        enable_people_search_org_chart: { type: 'boolean', description: 'Enable or disable People Search & Org Chart.' },
-        enable_welcome_emails: { type: 'boolean', description: 'Enable or disable Welcome Emails.' },
-        enable_projects: { type: 'boolean', description: 'Enable or disable Projects.' },
-        enable_mobile_app_access: { type: 'boolean', description: 'Enable or disable Mobile App Access.' },
-        enable_multi_agent_orchestration: { type: 'boolean', description: 'Enable or disable Multi-Agent Orchestration.' },
-        enable_single_agent_orchestration: { type: 'boolean', description: 'Enable or disable Single-Agent Orchestration.' },
-        enable_bi_directional_audio: { type: 'boolean', description: 'Enable or disable Bi-directional Audio.' },
-        enable_cross_product_intelligence: { type: 'boolean', description: 'Enable or disable Cross-product Intelligence.' },
-        enable_cross_domain_documents: { type: 'boolean', description: 'Enable or disable Include cross-domain documents.' },
-        enable_all_features: { type: 'boolean', description: 'Convenience flag to enable all 27 feature flags at once.' },
-        disable_all_features: { type: 'boolean', description: 'Convenience flag to disable all 27 feature flags at once.' }
+        project_id: { type: 'string', description: 'Optional. Google Cloud Project ID.' },
+        location: { type: 'string', description: 'Optional. Google Cloud Region.' },
+        engine_id: { type: 'string', description: 'ID of the app/engine. Required.' },
+        ...featureToggleSchemaProperties(),
+        enable_all_features: { type: 'boolean', description: 'Enable all toggles except remote-vm, code-extraction, skill sharing without approval and sobi.' },
+        disable_all_features: { type: 'boolean', description: 'Disable all toggles.' },
+        dry_run: { type: 'boolean', description: 'For cleanup_invalid_keys. Defaults to true (report only).' }
       },
       required: ['action', 'engine_id']
     }
   },
   {
     name: 'gemini_enterprise_manage_models',
-    description: 'Manage Gemini Enterprise Model Availability toggles (e.g. Gemini 2.5 pro, Gemini 3.1 Pro, Gemini 3.5 Flash, Gemini 3.6 Flash).',
+    description: 'Get or update Gemini Enterprise model availability (Engine.modelConfigs). Anthropic models also require pay-as-you-go overages.',
     inputSchema: {
       type: 'object',
       properties: {
-        action: {
-          type: 'string',
-          enum: ['get', 'update'],
-          description: 'The action to perform: get or update.'
+        action: { type: 'string', enum: ['get', 'update'], description: 'get or update.' },
+        project_id: { type: 'string', description: 'Optional. Google Cloud Project ID.' },
+        location: { type: 'string', description: 'Optional. Google Cloud Region.' },
+        engine_id: { type: 'string', description: 'The target App / Engine ID.' },
+        ...modelSchemaProperties(),
+        model_configs: {
+          type: 'object',
+          additionalProperties: { type: 'boolean' },
+          description: 'Optional. Map of exact model id to enabled flag, for models without a shortcut (e.g. {"gemini-3.8-flash": true}).'
         },
-        engine_id: {
-          type: 'string',
-          description: 'The target App / Engine ID (e.g., "tes" or "assistente-bandi-e-appalti").'
-        },
-        enable_gemini_2_5_pro: { type: 'boolean', description: 'Enable or disable Gemini 2.5 pro.' },
-        enable_gemini_3_1_pro: { type: 'boolean', description: 'Enable or disable Gemini 3.1 Pro.' },
-        enable_gemini_3_5_flash: { type: 'boolean', description: 'Enable or disable Gemini 3.5 Flash.' },
-        enable_gemini_3_6_flash: { type: 'boolean', description: 'Enable or disable Gemini 3.6 Flash.' },
-        enable_all_models: { type: 'boolean', description: 'Convenience flag to enable all Gemini models at once.' },
-        disable_all_models: { type: 'boolean', description: 'Convenience flag to disable all Gemini models at once.' }
+        enable_all_models: { type: 'boolean', description: 'Enable every model already configured on the engine.' },
+        disable_all_models: { type: 'boolean', description: 'Disable every model already configured on the engine.' }
       },
       required: ['action', 'engine_id']
     }
@@ -544,74 +497,47 @@ export const adminTools: any[] = [
   },
   {
     name: 'gemini_enterprise_manage_assistant',
-    description: 'Manage Gemini Enterprise Assistant configurations, system instructions, and prompt chips.',
+    description: 'Get or update Gemini Enterprise assistant governance (default_assistant): system instructions, models, web grounding, location context, Knowledge Catalog, banned phrases, Model Armor, Sensitive Data Protection and chat history retention.',
     inputSchema: {
       type: 'object',
       properties: {
-        action: {
-          type: 'string',
-          enum: ['get', 'update', 'update_prompt_chips', 'update_system_instruction'],
-          description: 'The action to perform: get, update, update_prompt_chips, or update_system_instruction.'
-        },
-        project_id: {
-          type: 'string',
-          description: 'Optional. Google Cloud Project ID.'
-        },
-        location: {
-          type: 'string',
-          description: 'Optional. Google Cloud Region.'
-        },
-        engine_id: {
-          type: 'string',
-          description: 'ID of the app/engine. Required.'
-        },
-        prompt_chips: {
-          type: 'array',
-          items: { type: 'string' },
-          description: 'List of prompt chip text suggestions for the assistant UI.'
-        },
-        system_instruction: {
-          type: 'string',
-          description: 'System instruction prompt for the assistant AI model (Customize Additional LLM system instructions).'
-        },
-        use_default_system_instruction: {
-          type: 'boolean',
-          description: 'Set to true to select "Use default" for Additional LLM system instructions, or false to Customize.'
-        },
-        enable_web_grounding: {
-          type: 'boolean',
-          description: 'Enable or disable web grounding (allow Gemini Enterprise to use web search results as answer sources).'
-        },
-        web_grounding_type: {
-          type: 'string',
-          enum: ['GOOGLE_SEARCH', 'ENTERPRISE_WEB_SEARCH'],
-          description: 'Choose "GOOGLE_SEARCH" (not data residency compliant) or "ENTERPRISE_WEB_SEARCH" (data residency compliant).'
-        },
-        default_web_search_state: {
-          type: 'boolean',
-          description: 'Choose whether web search is turned on or off by default for new queries.'
-        },
-        enable_location_context: {
-          type: 'boolean',
-          description: 'Allow the Gemini Enterprise app to use your location to improve response quality.'
-        },
+        action: { type: 'string', enum: ['get', 'update'], description: 'get or update.' },
+        project_id: { type: 'string', description: 'Optional. Google Cloud Project ID.' },
+        location: { type: 'string', description: 'Optional. Google Cloud Region.' },
+        engine_id: { type: 'string', description: 'ID of the app/engine. Required.' },
+        system_instruction: { type: 'string', description: 'Additional LLM system instructions.' },
+        use_default_system_instruction: { type: 'boolean', description: 'true clears the additional system instructions.' },
+        default_model_id: { type: 'string', description: 'Default model id for the assistant.' },
+        allowed_model_ids: { type: 'array', items: { type: 'string' }, description: 'Model ids users may select.' },
+        default_language: { type: 'string', description: 'Default response language code.' },
+        enable_web_grounding: { type: 'boolean', description: 'Allow web search results as answer sources.' },
+        web_grounding_type: { type: 'string', enum: ['GOOGLE_SEARCH', 'ENTERPRISE_WEB_SEARCH', 'DISABLED'], description: 'ENTERPRISE_WEB_SEARCH is data-residency compliant; GOOGLE_SEARCH is not.' },
+        default_web_search_state: { type: 'boolean', description: 'Whether web search is on by default for new queries.' },
+        enable_location_context: { type: 'boolean', description: 'Use the user location to improve answers.' },
+        enable_knowledge_catalog: { type: 'boolean', description: 'Enable Knowledge Catalog integration (Preview).' },
         banned_phrases: {
           type: 'array',
-          items: { type: 'string' },
-          description: 'List of banned phrase strings.'
+          items: {
+            anyOf: [
+              { type: 'string' },
+              { type: 'object', properties: { phrase: { type: 'string' }, match_type: { type: 'string', enum: ['SIMPLE_STRING_MATCH', 'WORD_BOUNDARY_STRING_MATCH'] }, ignore_diacritics: { type: 'boolean' } }, required: ['phrase'] }
+            ]
+          },
+          description: 'Replaces the banned phrase list.'
         },
-        chat_history_retention_days: {
-          type: 'number',
-          description: 'Number of days to retain chat history for each new session (e.g., 30, 60, 90).'
+        model_armor: {
+          type: 'object',
+          properties: {
+            user_prompt_template: { type: 'string' },
+            response_template: { type: 'string' },
+            failure_mode: { type: 'string', enum: ['FAIL_OPEN', 'FAIL_CLOSED'] }
+          },
+          description: 'Model Armor template resource names applied to prompts and responses.'
         },
-        enable_all_assistant_features: {
-          type: 'boolean',
-          description: 'Convenience flag to enable web grounding, default web search, and location context at once.'
-        },
-        disable_all_assistant_features: {
-          type: 'boolean',
-          description: 'Convenience flag to disable web grounding, default web search, and location context at once.'
-        }
+        sensitive_data_protection_policy: { type: 'string', description: 'Sensitive Data Protection policy resource name.' },
+        chat_history_retention_days: { type: 'number', description: 'Chat history retention for new sessions, in days (Engine.sessionConfig.sessionTtl).' },
+        enable_all_assistant_features: { type: 'boolean', description: 'Enable web grounding, default web search and location context.' },
+        disable_all_assistant_features: { type: 'boolean', description: 'Disable web grounding, default web search and location context.' }
       },
       required: ['action', 'engine_id']
     }
@@ -697,6 +623,69 @@ export const adminTools: any[] = [
       },
       required: ['action', 'engine_id']
     }
+  },
+  {
+    name: 'gemini_enterprise_get_operation',
+    description: 'Get the status of a long-running operation returned by another tool (Discovery Engine or Vertex AI Skill Registry).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        operation_name: { type: 'string', description: 'Full operation resource name, e.g. projects/p/locations/global/collections/c/engines/e/operations/123.' },
+        project_id: { type: 'string', description: 'Optional. Google Cloud Project ID used for quota attribution.' }
+      },
+      required: ['operation_name']
+    }
+  },
+  {
+    name: 'gemini_enterprise_inspect',
+    description: 'Read-only inspection of Gemini Enterprise control-plane resources (apps, app_iam, datastores, datastore_iam, connector, connector_runs, target_sites, schema, controls, agents, features + invalid_keys, models, search_ui, assistant, observability, knowledge_graph, skills, skill_revisions). Safe for parallel calls without confirmation prompts.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        target: {
+          type: 'string',
+          enum: [...INSPECT_TARGETS],
+          description: 'Resource to inspect (read-only).'
+        },
+        project_id: {
+          type: 'string',
+          description: 'Optional. Google Cloud Project ID (overrides default).'
+        },
+        location: {
+          type: 'string',
+          description: 'Optional. Google Cloud location (e.g. global, us, eu, us-central1 for skills).'
+        },
+        engine_id: {
+          type: 'string',
+          description: 'App/engine ID. Optional for apps (omit to list all apps, set to get one); required for app_iam, agents, features, models, search_ui, assistant, observability, knowledge_graph.'
+        },
+        datastore_id: {
+          type: 'string',
+          description: 'Data store ID. Optional for datastores (omit to list, set to get one); required for target_sites, schema, controls, or datastore_iam on a data store.'
+        },
+        collection_id: {
+          type: 'string',
+          description: 'Collection ID (defaults to default_collection for datastores). Required for connector, connector_runs, or collection-level datastore_iam.'
+        },
+        agent_id: {
+          type: 'string',
+          description: 'Optional agent ID for target "agents" (omit to list all agents on engine_id, set to get one).'
+        },
+        skill_id: {
+          type: 'string',
+          description: 'Skill ID for target "skills" (get one) or required for "skill_revisions".'
+        },
+        query: {
+          type: 'string',
+          description: 'Optional semantic search query for target "skills" (retrieve).'
+        },
+        top_k: {
+          type: 'number',
+          description: 'Optional max results for target "skills" when query is provided.'
+        }
+      },
+      required: ['target']
+    }
   }
 ];
 
@@ -709,16 +698,53 @@ function getGcpParams(args: any) {
     throw new Error('Google Cloud Project ID is not configured. Please provide project_id or verify environment variables.');
   }
 
-  const options: any = { projectId };
-  if (location && location !== 'global') {
-    options.apiEndpoint = `${location}-discoveryengine.googleapis.com`;
-  }
+  const options = gapicClientOptions(projectId, location);
   return { projectId, location, options };
+}
+
+function textResult(payload: unknown) {
+  return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
+}
+
+const RESOURCE_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$/;
+
+const LRO_TIMEOUT = Symbol('lro-timeout');
+
+/**
+ * Waits for a GAPIC long-running operation for at most config.lroWaitSeconds. Remote MCP clients
+ * (e.g. Gemini Enterprise) time out on long tool calls, so slow operations are returned as pending
+ * and can be polled with gemini_enterprise_get_operation.
+ */
+async function settleGapicOperation(operation: any): Promise<{ done: true; result: any[] } | { done: false; operation: string }> {
+  const completion = operation.promise();
+  completion.catch(() => undefined); // avoid an unhandled rejection if we stop waiting
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise(resolve => {
+    timer = setTimeout(() => resolve(LRO_TIMEOUT), config.lroWaitSeconds * 1000);
+    timer.unref();
+  });
+  const outcome = await Promise.race([completion, timeout]);
+  clearTimeout(timer);
+  if (outcome === LRO_TIMEOUT) return { done: false, operation: operation.name };
+  return { done: true, result: outcome as any[] };
+}
+
+function pendingOperationResult(operationName: string) {
+  return textResult({
+    status: 'RUNNING',
+    message: 'The operation is still running. Poll it with gemini_enterprise_get_operation.',
+    operation_name: operationName
+  });
 }
 
 // Handler routing tool calls to appropriate actions
 export async function handleAdminToolCall(name: string, args: any): Promise<any> {
   switch (name) {
+    case 'gemini_enterprise_inspect': {
+      const skillsUsable = config.transport === 'stdio' || config.http.acceptedScopes.includes('https://www.googleapis.com/auth/cloud-platform');
+      const { toolName, cleanArgs } = buildInspectCall(args, { skillsUsable });
+      return await handleAdminToolCall(toolName, cleanArgs);
+    }
     case 'gemini_enterprise_manage_apps':
       return await manageApps(args);
     case 'gemini_enterprise_manage_datastore':
@@ -749,6 +775,8 @@ export async function handleAdminToolCall(name: string, args: any): Promise<any>
       return await manageObservability(args);
     case 'gemini_enterprise_manage_knowledge_graph':
       return await manageKnowledgeGraph(args);
+    case 'gemini_enterprise_get_operation':
+      return await getOperation(args);
     default:
       throw new Error(`Unknown admin tool: ${name}`);
   }
@@ -838,7 +866,7 @@ async function manageApps(args: any): Promise<any> {
     const headers = await getAuthHeaders(projectId);
     
     // For specific GCP region routing, ensure host matches location
-    const host = location && location !== 'global' ? `${location}-discoveryengine.googleapis.com` : 'discoveryengine.googleapis.com';
+    const host = discoveryEngineHost(location);
     const restBaseUrl = `https://${host}/v1alpha/${parent}/engines?engineId=${engineId}`;
 
     const res = await fetch(restBaseUrl, {
@@ -855,23 +883,13 @@ async function manageApps(args: any): Promise<any> {
     let operation = await res.json();
     const lroName = operation.name;
     
-    // Poll the Long Running Operation with timeout guard (max 5 minutes)
-    const startTime = Date.now();
-    const MAX_POLL_MS = 5 * 60 * 1000;
-    while (!operation.done) {
-      if (Date.now() - startTime > MAX_POLL_MS) {
-        throw new Error(`Timeout waiting for engine creation LRO "${lroName}" to complete.`);
-      }
+    // Bounded wait: long creations return the operation name for gemini_enterprise_get_operation.
+    const deadline = Date.now() + config.lroWaitSeconds * 1000;
+    while (!operation.done && Date.now() < deadline) {
       await new Promise(r => setTimeout(r, 3000));
-      const opRes = await fetch(`https://${host}/v1alpha/${lroName}`, {
-        headers
-      });
-      if (!opRes.ok) {
-        const opErrText = await opRes.text();
-        throw new Error(`Failed to poll LRO "${lroName}": ${opRes.status} ${opRes.statusText}. Details: ${opErrText}`);
-      }
-      operation = await opRes.json();
+      operation = await fetchJson(`https://${host}/v1alpha/${lroName}`, { headers }, `Poll operation ${lroName}`);
     }
+    if (!operation.done) return pendingOperationResult(lroName);
 
     if (operation.error) {
       throw new Error(`Engine creation failed: ${JSON.stringify(operation.error)}`);
@@ -899,7 +917,8 @@ async function manageApps(args: any): Promise<any> {
 
   if (action === 'delete') {
     const [operation] = await client.deleteEngine({ name: engineName });
-    await operation.promise();
+    const settled = await settleGapicOperation(operation);
+    if (!settled.done) return pendingOperationResult(settled.operation);
     return {
       content: [
         {
@@ -946,7 +965,7 @@ async function manageApps(args: any): Promise<any> {
 
   if (action === 'get-iam') {
     console.error(`[Admin] Getting IAM policy for app "${engineId}" in Project "${projectId}"`);
-    const host = `${location}-discoveryengine.googleapis.com`;
+    const host = discoveryEngineHost(location);
     const url = `https://${host}/v1/projects/${projectId}/locations/${location}/collections/${config.collectionId}/engines/${engineId}:getIamPolicy`;
     const headers = await getAuthHeaders(projectId);
     const res = await fetch(url, {
@@ -978,7 +997,7 @@ async function manageApps(args: any): Promise<any> {
       throw new Error('policy object is required for set-iam action.');
     }
     console.error(`[Admin] Setting IAM policy for app "${engineId}" in Project "${projectId}"`);
-    const host = `${location}-discoveryengine.googleapis.com`;
+    const host = discoveryEngineHost(location);
     const url = `https://${host}/v1/projects/${projectId}/locations/${location}/collections/${config.collectionId}/engines/${engineId}:setIamPolicy`;
     const headers = await getAuthHeaders(projectId);
     const res = await fetch(url, {
@@ -1013,42 +1032,74 @@ async function manageApps(args: any): Promise<any> {
 // 2. DataStore Management
 async function manageDataStores(args: any): Promise<any> {
   const { projectId, location, options } = getGcpParams(args);
-  const client = new DataStoreServiceClient(options);
-  const parent = `projects/${projectId}/locations/${location}/collections/${config.collectionId}`;
-  
   const action = args.action;
+  const collectionId = args.collection_id || config.collectionId;
+  if (!RESOURCE_ID.test(collectionId)) throw new Error('Invalid collection_id.');
+  const parent = `projects/${projectId}/locations/${location}/collections/${collectionId}`;
+  const dataStoreId = args.datastore_id;
+  if (dataStoreId !== undefined && !RESOURCE_ID.test(dataStoreId)) throw new Error('Invalid datastore_id.');
+  const dataStoreName = `${parent}/dataStores/${dataStoreId}`;
+
+  if (action === 'set-resource-access-control') {
+    if (typeof args.enabled !== 'boolean') throw new Error('enabled (boolean) is required for set-resource-access-control.');
+    const headers = await getAuthHeaders(projectId);
+    const mask = 'customer_provided_config.resource_access_control_config.data_store_access_control_enabled';
+    const project = await fetchJson(`${discoveryEngineBaseUrl('global', 'v1alpha')}/projects/${projectId}?updateMask=${mask}`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ customerProvidedConfig: { resourceAccessControlConfig: { dataStoreAccessControlEnabled: args.enabled } } })
+    }, 'Update project resource access control');
+    return textResult({
+      status: 'SUCCESS',
+      data_store_access_control_enabled: project.customerProvidedConfig?.resourceAccessControlConfig?.dataStoreAccessControlEnabled ?? args.enabled
+    });
+  }
+
+  if (action === 'get-iam' || action === 'set-iam') {
+    const resource = dataStoreId ? dataStoreName : parent;
+    const headers = await getAuthHeaders(projectId);
+    const base = `${discoveryEngineBaseUrl(location, 'v1alpha')}/${resource}`;
+    if (action === 'get-iam') {
+      const policy = await fetchJson(`${base}:getIamPolicy?options.requestedPolicyVersion=3`, { headers }, 'Get IAM policy');
+      return textResult({ status: 'SUCCESS', resource, policy });
+    }
+    if (!args.policy || typeof args.policy !== 'object') throw new Error('policy object is required for set-iam.');
+    if (!args.policy.etag) throw new Error('policy.etag is required: read it with get-iam first to avoid overwriting concurrent changes.');
+    const policy = await fetchJson(`${base}:setIamPolicy`, { method: 'POST', headers, body: JSON.stringify({ policy: args.policy }) }, 'Set IAM policy');
+    return textResult({ status: 'SUCCESS', resource, policy });
+  }
+
+  const client = new DataStoreServiceClient(options);
 
   if (action === 'list') {
     const [dataStores] = await client.listDataStores({ parent });
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            status: 'SUCCESS',
-            message: `Successfully retrieved DataStores for project "${projectId}".`,
-            count: dataStores.length,
-            dataStores: dataStores.map((ds: any) => ({
-              name: ds.name,
-              displayName: ds.displayName,
-              industryVertical: ds.industryVertical,
-              createTime: ds.createTime
-            }))
-          }, null, 2)
-        }
-      ]
-    };
+    return textResult({
+      status: 'SUCCESS',
+      message: `Successfully retrieved DataStores for project "${projectId}".`,
+      count: dataStores.length,
+      dataStores: dataStores.map((ds: any) => ({
+        name: ds.name,
+        displayName: ds.displayName,
+        industryVertical: ds.industryVertical,
+        createTime: ds.createTime
+      }))
+    });
   }
 
-  const dataStoreId = args.datastore_id;
   if (!dataStoreId) {
-    throw new Error('datastore_id is required for create and delete actions.');
+    throw new Error('datastore_id is required for get, create and delete actions.');
   }
 
-  const dataStoreName = `${parent}/dataStores/${dataStoreId}`;
+  if (action === 'get') {
+    const [dataStore] = await client.getDataStore({ name: dataStoreName });
+    return textResult({ status: 'SUCCESS', dataStore });
+  }
 
   if (action === 'create') {
     const industryVertical = args.industry_vertical || 'GENERIC';
+    if (!['GENERIC', 'MEDIA'].includes(industryVertical)) {
+      throw new Error('industry_vertical must be GENERIC or MEDIA (HEALTHCARE_FHIR was deprecated).');
+    }
     const [operation] = await client.createDataStore({
       parent,
       dataStoreId,
@@ -1058,71 +1109,93 @@ async function manageDataStores(args: any): Promise<any> {
       }
     });
 
-    const [createdDataStore] = await operation.promise();
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            status: 'SUCCESS',
-            message: `DataStore "${dataStoreId}" created successfully.`,
-            dataStore: {
-              name: createdDataStore.name,
-              displayName: createdDataStore.displayName,
-              industryVertical: createdDataStore.industryVertical
-            }
-          }, null, 2)
-        }
-      ]
-    };
+    const settled = await settleGapicOperation(operation);
+    if (!settled.done) return pendingOperationResult(settled.operation);
+    const [createdDataStore] = settled.result;
+    return textResult({
+      status: 'SUCCESS',
+      message: `DataStore "${dataStoreId}" created successfully.`,
+      dataStore: {
+        name: createdDataStore.name,
+        displayName: createdDataStore.displayName,
+        industryVertical: createdDataStore.industryVertical
+      }
+    });
   }
 
   if (action === 'delete') {
     const [operation] = await client.deleteDataStore({ name: dataStoreName });
-    await operation.promise();
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            status: 'SUCCESS',
-            message: `DataStore "${dataStoreId}" deleted successfully.`
-          }, null, 2)
-        }
-      ]
-    };
+    const settled = await settleGapicOperation(operation);
+    if (!settled.done) return pendingOperationResult(settled.operation);
+    return textResult({ status: 'SUCCESS', message: `DataStore "${dataStoreId}" deleted successfully.` });
   }
 
   throw new Error(`Unsupported action "${action}" for DataStores.`);
 }
 
-// 3. Connector Configuration (Mock/Simulation fallback as not exposed in v1 SDK clients)
+// 3. Connector Configuration (DataConnector REST API)
+
 async function configureConnector(args: any): Promise<any> {
   const { projectId, location } = getGcpParams(args);
-  const { datastore_id, connector_type, config_payload } = args;
+  const { action, collection_id: collectionId } = args;
+  if (!collectionId || !RESOURCE_ID.test(collectionId)) throw new Error('A valid collection_id is required.');
 
-  console.error(`[ConnectorConfig] Configuring ${connector_type} connector for DataStore ${datastore_id} in project ${projectId}`);
+  const headers = await getAuthHeaders(projectId);
+  const locationPath = `projects/${projectId}/locations/${location}`;
+  const connectorPath = `${locationPath}/collections/${collectionId}/dataConnector`;
+  // connectorRuns endpoints reject project IDs (observed 2026-10-25) and require the project-number
+  // form, so they use the canonical resource name returned by getDataConnector.
+  const canonicalConnectorName = async (): Promise<string> =>
+    (await fetchJson(`${discoveryEngineBaseUrl(location, 'v1')}/${connectorPath}`, { headers }, 'Get data connector')).name;
 
-  return {
-    content: [
-      {
-        type: 'text',
-        text: JSON.stringify({
-          status: 'SUCCESS',
-          message: `Successfully configured third-party data connector "${connector_type}" for DataStore "${datastore_id}".`,
-          details: {
-            datastoreId: datastore_id,
-            connectorType: connector_type,
-            projectId,
-            location,
-            state: 'ACTIVE',
-            syncStatus: 'READY_TO_SYNC',
-            configPayload: config_payload
-          }
-        }, null, 2)
-      }
-    ]
-  };
+  switch (action) {
+    case 'get': {
+      const connector = await fetchJson(`${discoveryEngineBaseUrl(location, 'v1')}/${connectorPath}`, { headers }, 'Get data connector');
+      return textResult({ status: 'SUCCESS', data_connector: connector });
+    }
+
+    case 'setup': {
+      if (!args.data_connector || typeof args.data_connector !== 'object') throw new Error('data_connector object is required for setup.');
+      const displayName = args.collection_display_name || collectionId;
+      const url = `${discoveryEngineBaseUrl(location, 'v1alpha')}/${locationPath}:setUpDataConnectorV2?collectionId=${encodeURIComponent(collectionId)}&collectionDisplayName=${encodeURIComponent(displayName)}`;
+      const operation = await fetchJson(url, { method: 'POST', headers, body: JSON.stringify(args.data_connector) }, 'Set up data connector');
+      return textResult({ status: 'STARTED', message: 'Connector setup started. Poll the operation until done.', operation: operation.name, done: Boolean(operation.done) });
+    }
+
+    case 'update_citation_mappings': {
+      const mappings = validateCitationMappings(args.citation_mappings);
+      // Narrow mask and only citation_mappings in actionParams, as required by the docs:
+      // echoing other actionParams (e.g. OAuth settings) back would fail or overwrite them.
+      const connector = await fetchJson(`${discoveryEngineBaseUrl(location, 'v1')}/${connectorPath}?updateMask=action_config.action_params`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ actionConfig: { actionParams: { citation_mappings: mappings } } })
+      }, 'Update citation mappings');
+      return textResult({
+        status: 'SUCCESS',
+        message: 'Citation mappings replaced. They apply to new chats only.',
+        citation_mappings: connector.actionConfig?.actionParams?.citation_mappings ?? mappings
+      });
+    }
+
+    case 'list_runs': {
+      const data = await fetchJson(`${discoveryEngineBaseUrl(location, 'v1alpha')}/${await canonicalConnectorName()}/connectorRuns?pageSize=20`, { headers }, 'List connector runs');
+      return textResult({ status: 'SUCCESS', connector_runs: data.connectorRuns || [], next_page_token: data.nextPageToken });
+    }
+
+    case 'start_run': {
+      const body: any = {};
+      if (Array.isArray(args.entities)) body.entities = args.entities.map(String);
+      if (args.force_refresh_content !== undefined) body.forceRefreshContent = Boolean(args.force_refresh_content);
+      const run = await fetchJson(`${discoveryEngineBaseUrl(location, 'v1alpha')}/${await canonicalConnectorName()}:startConnectorRun`, {
+        method: 'POST', headers, body: JSON.stringify(body)
+      }, 'Start connector run');
+      return textResult({ status: 'STARTED', connector_run: run });
+    }
+
+    default:
+      throw new Error(`Unsupported action "${action}" for gemini_enterprise_configure_connector.`);
+  }
 }
 
 // 4. Target Sites Management
@@ -1167,7 +1240,11 @@ async function manageTargetSites(args: any): Promise<any> {
       }
     });
 
-    const [createdSite] = await operation.promise();
+    const settled = await settleGapicOperation(operation);
+
+    if (!settled.done) return pendingOperationResult(settled.operation);
+
+    const [createdSite] = settled.result;
     return {
       content: [
         {
@@ -1196,7 +1273,8 @@ async function manageTargetSites(args: any): Promise<any> {
     }
 
     const [operation] = await client.deleteTargetSite({ name: matchedSite.name });
-    await operation.promise();
+    const settled = await settleGapicOperation(operation);
+    if (!settled.done) return pendingOperationResult(settled.operation);
 
     return {
       content: [
@@ -1258,7 +1336,9 @@ async function manageDocuments(args: any): Promise<any> {
     }
 
     const [operation] = await client.importDocuments(importRequest);
-    const [response] = await operation.promise();
+    const settled = await settleGapicOperation(operation);
+    if (!settled.done) return pendingOperationResult(settled.operation);
+    const [response] = settled.result;
 
     return {
       content: [
@@ -1280,7 +1360,9 @@ async function manageDocuments(args: any): Promise<any> {
       filter: '*',
       force: true
     });
-    const [response] = await operation.promise();
+    const settled = await settleGapicOperation(operation);
+    if (!settled.done) return pendingOperationResult(settled.operation);
+    const [response] = settled.result;
 
     return {
       content: [
@@ -1364,7 +1446,11 @@ async function manageSchema(args: any): Promise<any> {
       }
     });
 
-    const [createdSchema] = await operation.promise();
+    const settled = await settleGapicOperation(operation);
+
+    if (!settled.done) return pendingOperationResult(settled.operation);
+
+    const [createdSchema] = settled.result;
     return {
       content: [
         {
@@ -1390,7 +1476,11 @@ async function manageSchema(args: any): Promise<any> {
       }
     });
 
-    const [updatedSchema] = await operation.promise();
+    const settled = await settleGapicOperation(operation);
+
+    if (!settled.done) return pendingOperationResult(settled.operation);
+
+    const [updatedSchema] = settled.result;
     return {
       content: [
         {
@@ -1511,34 +1601,29 @@ async function manageControls(args: any): Promise<any> {
   throw new Error(`Unsupported action "${action}" for Controls.`);
 }
 
-// Helper to retrieve auth headers polimorphically (handles Node 18+ iterable headers)
-async function getAuthHeaders(projectId: string): Promise<Record<string, string>> {
-  const auth = new GoogleAuth({
-    scopes: ['https://www.googleapis.com/auth/cloud-platform']
-  });
-  const headers = await auth.getRequestHeaders();
-  const authHeaders: Record<string, string> = {};
-  
-  if (headers && typeof headers.forEach === 'function') {
-    headers.forEach((value, key) => {
-      if (value) {
-        authHeaders[key.toLowerCase()] = value;
-      }
-    });
-  } else if (headers) {
-    for (const [key, value] of Object.entries(headers)) {
-      if (value) {
-        authHeaders[key.toLowerCase()] = value as string;
-      }
-    }
+// 8. Native Agent Management
+const REASONING_ENGINE = /^projects\/[^/]+\/locations\/[^/]+\/reasoningEngines\/[^/]+$/;
+
+function validateReasoningEngine(value: unknown): string {
+  if (typeof value !== 'string' || !REASONING_ENGINE.test(value)) {
+    throw new Error('reasoning_engine must be projects/{project}/locations/{location}/reasoningEngines/{id}.');
   }
-  
-  authHeaders['x-goog-user-project'] = projectId;
-  authHeaders['content-type'] = 'application/json';
-  return authHeaders;
+  return value;
 }
 
-// 8. Native Agent Management
+function agentGovernanceFields(sharingScope: unknown, starterPrompts: unknown): any {
+  const fields: any = {};
+  if (sharingScope !== undefined) {
+    if (!['PRIVATE', 'RESTRICTED', 'ALL_USERS'].includes(String(sharingScope))) throw new Error('sharing_scope must be PRIVATE, RESTRICTED or ALL_USERS.');
+    fields.sharingConfig = { scope: sharingScope };
+  }
+  if (starterPrompts !== undefined) {
+    if (!Array.isArray(starterPrompts)) throw new Error('starter_prompts must be an array of strings.');
+    fields.starterPrompts = starterPrompts.map(text => ({ text: String(text) }));
+  }
+  return fields;
+}
+
 async function manageAgents(args: any): Promise<any> {
   const projectId = args.project_id || config.projectId;
   const location = args.location || config.location;
@@ -1554,7 +1639,10 @@ async function manageAgents(args: any): Promise<any> {
     instruction, 
     datastores, 
     tools,
-    subagents
+    subagents,
+    reasoning_engine,
+    sharing_scope,
+    starter_prompts
   } = args;
 
   if (!projectId) {
@@ -1564,7 +1652,7 @@ async function manageAgents(args: any): Promise<any> {
     throw new Error('engine_id is required.');
   }
 
-  const host = location && location !== 'global' ? `${location}-discoveryengine.googleapis.com` : 'discoveryengine.googleapis.com';
+  const host = discoveryEngineHost(location);
   const baseUrl = `https://${host}/v1alpha/projects/${projectId}/locations/${location}/collections/${config.collectionId}/engines/${engine_id}/assistants/default_assistant/agents`;
 
   switch (action) {
@@ -1591,6 +1679,13 @@ async function manageAgents(args: any): Promise<any> {
       };
     }
 
+    case 'get': {
+      if (!agent_id) throw new Error('agent_id is required for get action.');
+      const headers = await getAuthHeaders(projectId);
+      const agent = await fetchJson(`${baseUrl}/${encodeURIComponent(agent_id)}`, { headers }, 'Get agent');
+      return textResult({ status: 'SUCCESS', agent });
+    }
+
     case 'create': {
       if (!agent_id) throw new Error('agent_id is required for create action.');
       const headers = await getAuthHeaders(projectId);
@@ -1605,7 +1700,7 @@ async function manageAgents(args: any): Promise<any> {
         console.error(`[Admin] Creating native Low-Code agent "${agent_id}" for engine "${engine_id}" in Project "${projectId}"`);
         
         const dataStoreSpecs = (datastores || []).map((dsId: string) => ({
-          dataStore: `projects/${projectId}/locations/${location}/collections/default_collection/dataStores/${dsId}`
+          dataStore: `projects/${projectId}/locations/${location}/collections/${config.collectionId}/dataStores/${dsId}`
         }));
 
         const toolSpecs = (tools || []).map((toolName: string) => ({
@@ -1633,7 +1728,7 @@ async function manageAgents(args: any): Promise<any> {
           rootNode.llmAgentNode.subAgentIds = subagents.map((sa: any) => sa.agent_id);
           for (const sa of subagents) {
             const saDataStoreSpecs = (sa.datastores || []).map((dsId: string) => ({
-              dataStore: `projects/${projectId}/locations/${location}/collections/default_collection/dataStores/${dsId}`
+              dataStore: `projects/${projectId}/locations/${location}/collections/${config.collectionId}/dataStores/${dsId}`
             }));
             const saToolSpecs = (sa.tools || []).map((tName: string) => ({
               name: tName
@@ -1667,9 +1762,18 @@ async function manageAgents(args: any): Promise<any> {
             nodes
           }
         };
+      } else if (agent_type === 'adk') {
+        payload = {
+          displayName: name,
+          description: desc,
+          adkAgentDefinition: { provisionedReasoningEngine: { reasoningEngine: validateReasoningEngine(reasoning_engine) } }
+        };
       } else {
         console.error(`[Admin] Creating custom A2A agent "${agent_id}" for engine "${engine_id}" in Project "${projectId}"`);
-        const endpoint = endpoint_url || `https://example.com/agents/${agent_id}`;
+        if (!endpoint_url || !/^https:\/\//.test(endpoint_url)) {
+          throw new Error('endpoint_url (https) is required for A2A agents.');
+        }
+        const endpoint = endpoint_url;
 
         const agentCard = {
           protocolVersion: 'a2a.v1',
@@ -1693,6 +1797,8 @@ async function manageAgents(args: any): Promise<any> {
           }
         };
       }
+
+      Object.assign(payload, agentGovernanceFields(sharing_scope, starter_prompts));
 
       const res = await fetch(url, {
         method: 'POST',
@@ -1767,7 +1873,7 @@ async function manageAgents(args: any): Promise<any> {
         url += ',lowCodeAgentDefinition';
 
         const dataStoreSpecs = (datastores || []).map((dsId: string) => ({
-          dataStore: `projects/${projectId}/locations/${location}/collections/default_collection/dataStores/${dsId}`
+          dataStore: `projects/${projectId}/locations/${location}/collections/${config.collectionId}/dataStores/${dsId}`
         }));
 
         const toolSpecs = (tools || []).map((toolName: string) => ({
@@ -1795,7 +1901,7 @@ async function manageAgents(args: any): Promise<any> {
           rootNode.llmAgentNode.subAgentIds = subagents.map((sa: any) => sa.agent_id);
           for (const sa of subagents) {
             const saDataStoreSpecs = (sa.datastores || []).map((dsId: string) => ({
-              dataStore: `projects/${projectId}/locations/${location}/collections/default_collection/dataStores/${dsId}`
+              dataStore: `projects/${projectId}/locations/${location}/collections/${config.collectionId}/dataStores/${dsId}`
             }));
             const saToolSpecs = (sa.tools || []).map((tName: string) => ({
               name: tName
@@ -1825,9 +1931,16 @@ async function manageAgents(args: any): Promise<any> {
           rootAgentId: 'root_agent',
           nodes
         };
+      } else if (agent_type === 'adk' && reasoning_engine !== undefined) {
+        url += ',adkAgentDefinition';
+        payload.adkAgentDefinition = { provisionedReasoningEngine: { reasoningEngine: validateReasoningEngine(reasoning_engine) } };
       } else {
         console.error(`[Admin] Updating native agent "${agent_id}" for engine "${engine_id}" in Project "${projectId}"`);
       }
+      const governance = agentGovernanceFields(sharing_scope, starter_prompts);
+      if (governance.sharingConfig) url += ',sharingConfig';
+      if (governance.starterPrompts) url += ',starterPrompts';
+      Object.assign(payload, governance);
 
       const res = await fetch(url, {
         method: 'PATCH',
@@ -1864,6 +1977,7 @@ async function manageSkills(args: any): Promise<any> {
   const projectId = args.project_id || config.projectId;
   const location = args.location || 'us-central1';
   const { action, skill_id, display_name, description, zipped_filesystem } = args;
+  if (skill_id !== undefined && !RESOURCE_ID.test(skill_id)) throw new Error('Invalid skill_id.');
 
   if (!projectId) {
     throw new Error('Google Cloud Project ID is required.');
@@ -1895,6 +2009,26 @@ async function manageSkills(args: any): Promise<any> {
           }
         ]
       };
+    }
+
+    case 'get': {
+      if (!skill_id) throw new Error('skill_id is required for get action.');
+      const skill = await fetchJson(`${baseUrl}/${skill_id}`, { headers }, 'Get skill');
+      return textResult({ status: 'SUCCESS', skill });
+    }
+
+    case 'retrieve': {
+      if (!args.query) throw new Error('query is required for retrieve action.');
+      const params = new URLSearchParams({ query: String(args.query) });
+      if (args.top_k !== undefined) params.set('topK', String(Math.max(1, Math.floor(Number(args.top_k)))));
+      const data = await fetchJson(`${baseUrl}:retrieve?${params}`, { headers }, 'Retrieve skills');
+      return textResult({ status: 'SUCCESS', retrieved_skills: data.retrievedSkills || [] });
+    }
+
+    case 'list_revisions': {
+      if (!skill_id) throw new Error('skill_id is required for list_revisions action.');
+      const data = await fetchJson(`${baseUrl}/${skill_id}/revisions`, { headers }, 'List skill revisions');
+      return textResult({ status: 'SUCCESS', revisions: data.revisions || data.skillRevisions || [], next_page_token: data.nextPageToken });
     }
 
     case 'create': {
@@ -2029,195 +2163,52 @@ async function manageSkills(args: any): Promise<any> {
 // 10. Feature Management
 async function manageFeatures(args: any): Promise<any> {
   const { projectId, location } = getGcpParams(args);
-  const parent = `projects/${projectId}/locations/${location}/collections/${config.collectionId}`;
   const engineId = args.engine_id;
-  const engineName = `${parent}/engines/${engineId}`;
+  if (!engineId) throw new Error('engine_id is required.');
+  const engineName = `projects/${projectId}/locations/${location}/collections/${config.collectionId}/engines/${engineId}`;
   const action = args.action;
+  const headers = await getAuthHeaders(projectId);
+  const baseUrl = `${discoveryEngineBaseUrl(location, 'v1alpha')}/${engineName}`;
 
-  const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
-  const authClient = await auth.getClient();
-  const token = (await authClient.getAccessToken()).token;
-  const restHeaders = {
-    'Authorization': `Bearer ${token}`,
-    'X-Goog-User-Project': projectId,
-    'Content-Type': 'application/json'
-  };
-  const baseUrl = `https://global-discoveryengine.googleapis.com/v1/${engineName}`;
+  const existing = await fetchJson(baseUrl, { headers }, 'Get engine');
+  const current: Record<string, string> = existing.features || {};
 
-  const mapFeaturesToResponse = (f: any) => ({
-    enable_agent_gallery: f['agent-gallery'] === 'FEATURE_STATE_ON',
-    enable_agent_designer: f['no-code-agent-builder'] === 'FEATURE_STATE_ON',
-    enable_prompt_gallery: f['prompt-gallery'] === 'FEATURE_STATE_ON',
-    enable_model_selector: f['model-selector'] === 'FEATURE_STATE_ON',
-    enable_notebook_lm: f['notebook-lm'] === 'FEATURE_STATE_ON',
-    enable_session_sharing: f['session-sharing'] === 'FEATURE_STATE_ON',
-    enable_memory: f['personalization-memory'] === 'FEATURE_STATE_ON',
-    enable_canvas: f['disable-canvas'] !== 'FEATURE_STATE_ON',
-    enable_skills: f['disable-skills'] !== 'FEATURE_STATE_ON',
-    enable_image_generation: f['disable-image-generation'] !== 'FEATURE_STATE_ON',
-    enable_video_generation: f['disable-video-generation'] !== 'FEATURE_STATE_ON',
-    enable_agent_sharing: f['disable-agent-sharing'] !== 'FEATURE_STATE_ON',
-    enable_agent_sharing_without_approval: f['agent-sharing-without-admin-approval'] === 'FEATURE_STATE_ON',
-    enable_end_user_sharing_with_groups: f['enable-end-user-sharing-with-groups'] === 'FEATURE_STATE_ON',
-    enable_google_drive_upload: f['disable-google-drive-upload'] !== 'FEATURE_STATE_ON',
-    enable_onedrive_upload: f['disable-onedrive-upload'] !== 'FEATURE_STATE_ON',
-    enable_talk_to_content: f['disable-talk-to-content'] !== 'FEATURE_STATE_ON',
-    enable_suggested_highlights: f['personalization-suggested-highlights'] === 'FEATURE_STATE_ON',
-    enable_people_search_org_chart: f['people-search-org-chart'] === 'FEATURE_STATE_ON',
-    enable_welcome_emails: f['disable-welcome-emails'] !== 'FEATURE_STATE_ON',
-    enable_projects: f['disable-projects'] !== 'FEATURE_STATE_ON',
-    enable_mobile_app_access: f['mobile-app-access'] === 'FEATURE_STATE_ON',
-    enable_multi_agent_orchestration: f['disable-multi-agent-orchestration'] !== 'FEATURE_STATE_ON',
-    enable_single_agent_orchestration: f['disable-single-agent-orchestration'] !== 'FEATURE_STATE_ON',
-    enable_bi_directional_audio: f['bi-directional-audio'] === 'FEATURE_STATE_ON',
-    enable_cross_product_intelligence: f['cross-product-intelligence'] === 'FEATURE_STATE_ON',
-    enable_cross_domain_documents: f['cross-domain-documents'] === 'FEATURE_STATE_ON' || f['include-cross-domain-documents'] === 'FEATURE_STATE_ON' || f['disable-cross-domain-documents'] === 'FEATURE_STATE_OFF'
-  });
+  const patchFeatures = (features: Record<string, string>) =>
+    fetchJson(`${baseUrl}?updateMask=features`, { method: 'PATCH', headers, body: JSON.stringify({ features }) }, 'Update engine features');
 
   if (action === 'get') {
-    const res = await fetch(baseUrl, { headers: restHeaders });
-    const data = await res.json();
-    const features = data.features || {};
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            status: 'SUCCESS',
-            engine_id: engineId,
-            features: mapFeaturesToResponse(features)
-          }, null, 2)
-        }
-      ]
-    };
+    return textResult({ status: 'SUCCESS', engine_id: engineId, features: describeFeatures(current) });
   }
 
   if (action === 'update') {
-    const resGet = await fetch(baseUrl, { headers: restHeaders });
-    const existing = await resGet.json();
-    const features = existing.features || {};
-
-    const setState = (val: boolean | undefined, current: string) => {
-      if (val === undefined) return current || 'FEATURE_STATE_ON';
-      return val ? 'FEATURE_STATE_ON' : 'FEATURE_STATE_OFF';
-    };
-
-    const setDisableState = (val: boolean | undefined, current: string) => {
-      if (val === undefined) return current || 'FEATURE_STATE_OFF';
-      return val ? 'FEATURE_STATE_OFF' : 'FEATURE_STATE_ON';
-    };
-
-    if (args.enable_all_features === true) {
-      features['agent-gallery'] = 'FEATURE_STATE_ON';
-      features['no-code-agent-builder'] = 'FEATURE_STATE_ON';
-      features['prompt-gallery'] = 'FEATURE_STATE_ON';
-      features['model-selector'] = 'FEATURE_STATE_ON';
-      features['notebook-lm'] = 'FEATURE_STATE_ON';
-      features['session-sharing'] = 'FEATURE_STATE_ON';
-      features['personalization-memory'] = 'FEATURE_STATE_ON';
-      features['disable-canvas'] = 'FEATURE_STATE_OFF';
-      features['disable-skills'] = 'FEATURE_STATE_OFF';
-      features['disable-image-generation'] = 'FEATURE_STATE_OFF';
-      features['disable-video-generation'] = 'FEATURE_STATE_OFF';
-      features['disable-agent-sharing'] = 'FEATURE_STATE_OFF';
-      features['agent-sharing-without-admin-approval'] = 'FEATURE_STATE_ON';
-      features['enable-end-user-sharing-with-groups'] = 'FEATURE_STATE_ON';
-      features['disable-google-drive-upload'] = 'FEATURE_STATE_OFF';
-      features['disable-onedrive-upload'] = 'FEATURE_STATE_OFF';
-      features['disable-talk-to-content'] = 'FEATURE_STATE_OFF';
-      features['personalization-suggested-highlights'] = 'FEATURE_STATE_ON';
-      features['people-search-org-chart'] = 'FEATURE_STATE_ON';
-      features['disable-welcome-emails'] = 'FEATURE_STATE_OFF';
-      features['disable-projects'] = 'FEATURE_STATE_OFF';
-      features['mobile-app-access'] = 'FEATURE_STATE_ON';
-      features['disable-multi-agent-orchestration'] = 'FEATURE_STATE_OFF';
-      features['disable-single-agent-orchestration'] = 'FEATURE_STATE_OFF';
-      features['bi-directional-audio'] = 'FEATURE_STATE_ON';
-      features['cross-product-intelligence'] = 'FEATURE_STATE_ON';
-      features['include-cross-domain-documents'] = 'FEATURE_STATE_ON';
-    } else if (args.disable_all_features === true) {
-      features['agent-gallery'] = 'FEATURE_STATE_OFF';
-      features['no-code-agent-builder'] = 'FEATURE_STATE_OFF';
-      features['prompt-gallery'] = 'FEATURE_STATE_OFF';
-      features['model-selector'] = 'FEATURE_STATE_OFF';
-      features['notebook-lm'] = 'FEATURE_STATE_OFF';
-      features['session-sharing'] = 'FEATURE_STATE_OFF';
-      features['personalization-memory'] = 'FEATURE_STATE_OFF';
-      features['disable-canvas'] = 'FEATURE_STATE_ON';
-      features['disable-skills'] = 'FEATURE_STATE_ON';
-      features['disable-image-generation'] = 'FEATURE_STATE_ON';
-      features['disable-video-generation'] = 'FEATURE_STATE_ON';
-      features['disable-agent-sharing'] = 'FEATURE_STATE_ON';
-      features['agent-sharing-without-admin-approval'] = 'FEATURE_STATE_OFF';
-      features['enable-end-user-sharing-with-groups'] = 'FEATURE_STATE_OFF';
-      features['disable-google-drive-upload'] = 'FEATURE_STATE_ON';
-      features['disable-onedrive-upload'] = 'FEATURE_STATE_ON';
-      features['disable-talk-to-content'] = 'FEATURE_STATE_ON';
-      features['personalization-suggested-highlights'] = 'FEATURE_STATE_OFF';
-      features['people-search-org-chart'] = 'FEATURE_STATE_OFF';
-      features['disable-welcome-emails'] = 'FEATURE_STATE_ON';
-      features['disable-projects'] = 'FEATURE_STATE_ON';
-      features['mobile-app-access'] = 'FEATURE_STATE_OFF';
-      features['disable-multi-agent-orchestration'] = 'FEATURE_STATE_ON';
-      features['disable-single-agent-orchestration'] = 'FEATURE_STATE_ON';
-      features['bi-directional-audio'] = 'FEATURE_STATE_OFF';
-      features['cross-product-intelligence'] = 'FEATURE_STATE_OFF';
-      features['include-cross-domain-documents'] = 'FEATURE_STATE_OFF';
-    } else {
-      if (args.enable_agent_gallery !== undefined) features['agent-gallery'] = setState(args.enable_agent_gallery, features['agent-gallery']);
-      if (args.enable_agent_designer !== undefined) features['no-code-agent-builder'] = setState(args.enable_agent_designer, features['no-code-agent-builder']);
-    if (args.enable_prompt_gallery !== undefined) features['prompt-gallery'] = setState(args.enable_prompt_gallery, features['prompt-gallery']);
-    if (args.enable_model_selector !== undefined) features['model-selector'] = setState(args.enable_model_selector, features['model-selector']);
-    if (args.enable_notebook_lm !== undefined) features['notebook-lm'] = setState(args.enable_notebook_lm, features['notebook-lm']);
-    if (args.enable_session_sharing !== undefined) features['session-sharing'] = setState(args.enable_session_sharing, features['session-sharing']);
-    if (args.enable_memory !== undefined) features['personalization-memory'] = setState(args.enable_memory, features['personalization-memory']);
-    if (args.enable_canvas !== undefined) features['disable-canvas'] = setDisableState(args.enable_canvas, features['disable-canvas']);
-    if (args.enable_skills !== undefined) features['disable-skills'] = setDisableState(args.enable_skills, features['disable-skills']);
-    if (args.enable_image_generation !== undefined) features['disable-image-generation'] = setDisableState(args.enable_image_generation, features['disable-image-generation']);
-    if (args.enable_video_generation !== undefined) features['disable-video-generation'] = setDisableState(args.enable_video_generation, features['disable-video-generation']);
-    if (args.enable_agent_sharing !== undefined) features['disable-agent-sharing'] = setDisableState(args.enable_agent_sharing, features['disable-agent-sharing']);
-    if (args.enable_agent_sharing_without_approval !== undefined) features['agent-sharing-without-admin-approval'] = setState(args.enable_agent_sharing_without_approval, features['agent-sharing-without-admin-approval']);
-    if (args.enable_end_user_sharing_with_groups !== undefined) features['enable-end-user-sharing-with-groups'] = setState(args.enable_end_user_sharing_with_groups, features['enable-end-user-sharing-with-groups']);
-    if (args.enable_google_drive_upload !== undefined) features['disable-google-drive-upload'] = setDisableState(args.enable_google_drive_upload, features['disable-google-drive-upload']);
-    if (args.enable_onedrive_upload !== undefined) features['disable-onedrive-upload'] = setDisableState(args.enable_onedrive_upload, features['disable-onedrive-upload']);
-    if (args.enable_talk_to_content !== undefined) features['disable-talk-to-content'] = setDisableState(args.enable_talk_to_content, features['disable-talk-to-content']);
-    if (args.enable_suggested_highlights !== undefined) features['personalization-suggested-highlights'] = setState(args.enable_suggested_highlights, features['personalization-suggested-highlights']);
-    if (args.enable_people_search_org_chart !== undefined) features['people-search-org-chart'] = setState(args.enable_people_search_org_chart, features['people-search-org-chart']);
-    if (args.enable_welcome_emails !== undefined) features['disable-welcome-emails'] = setDisableState(args.enable_welcome_emails, features['disable-welcome-emails']);
-    if (args.enable_projects !== undefined) features['disable-projects'] = setDisableState(args.enable_projects, features['disable-projects']);
-    if (args.enable_mobile_app_access !== undefined) features['mobile-app-access'] = setState(args.enable_mobile_app_access, features['mobile-app-access']);
-    if (args.enable_multi_agent_orchestration !== undefined) features['disable-multi-agent-orchestration'] = setDisableState(args.enable_multi_agent_orchestration, features['disable-multi-agent-orchestration']);
-    if (args.enable_single_agent_orchestration !== undefined) features['disable-single-agent-orchestration'] = setDisableState(args.enable_single_agent_orchestration, features['disable-single-agent-orchestration']);
-    if (args.enable_bi_directional_audio !== undefined) features['bi-directional-audio'] = setState(args.enable_bi_directional_audio, features['bi-directional-audio']);
-    if (args.enable_cross_product_intelligence !== undefined) features['cross-product-intelligence'] = setState(args.enable_cross_product_intelligence, features['cross-product-intelligence']);
-    if (args.enable_cross_domain_documents !== undefined) {
-      delete features['cross-domain-documents'];
-      delete features['disable-cross-domain-documents'];
-      features['include-cross-domain-documents'] = setState(args.enable_cross_domain_documents, features['include-cross-domain-documents']);
+    if (current['*'] !== undefined) {
+      // The API ignores every other key while the wildcard is present.
+      throw new Error(`Engine "${engineId}" has the wildcard feature key "*" set (${current['*']}); individual toggles are ignored until it is removed.`);
     }
-    }
-
-    const resPatch = await fetch(`${baseUrl}?updateMask=features`, {
-      method: 'PATCH',
-      headers: restHeaders,
-      body: JSON.stringify({ features })
+    const updated = await patchFeatures(applyFeatureUpdates(current, args));
+    return textResult({
+      status: 'SUCCESS',
+      message: `Feature management settings updated for app "${engineId}".`,
+      features: describeFeatures(updated.features || {})
     });
-    const updated = await resPatch.json();
-    const updatedFeatures = updated.features || {};
+  }
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            status: 'SUCCESS',
-            message: `Feature management settings updated for app "${engineId}".`,
-            features: mapFeaturesToResponse(updatedFeatures)
-          }, null, 2)
-        }
-      ]
-    };
+  if (action === 'cleanup_invalid_keys') {
+    const invalid = findInvalidFeatureKeys(current);
+    const removed = Object.fromEntries(invalid.map(k => [k, current[k]]));
+    if (args.dry_run === false && invalid.length > 0) {
+      const cleaned = Object.fromEntries(Object.entries(current).filter(([k]) => !invalid.includes(k)));
+      await patchFeatures(cleaned);
+    }
+    return textResult({
+      status: 'SUCCESS',
+      dry_run: args.dry_run !== false,
+      engine_id: engineId,
+      invalid_keys: removed,
+      message: invalid.length === 0
+        ? 'No invalid feature keys found.'
+        : (args.dry_run === false ? `Removed ${invalid.length} invalid feature keys.` : `Found ${invalid.length} invalid feature keys. Re-run with dry_run=false to remove them.`)
+    });
   }
 
   throw new Error(`Unsupported action "${action}" for gemini_enterprise_manage_features.`);
@@ -2225,96 +2216,32 @@ async function manageFeatures(args: any): Promise<any> {
 
 // 10b. Model Availability Management
 async function manageModels(args: any): Promise<any> {
-  const { projectId, location, options } = getGcpParams(args);
+  const { projectId, location } = getGcpParams(args);
   const engineId = args.engine_id;
-  const baseUrl = `https://global-discoveryengine.googleapis.com/v1/projects/${projectId}/locations/${location}/collections/${config.collectionId}/engines/${engineId}`;
+  if (!engineId) throw new Error('engine_id is required.');
   const action = args.action;
+  const headers = await getAuthHeaders(projectId);
+  const baseUrl = `${discoveryEngineBaseUrl(location, 'v1alpha')}/projects/${projectId}/locations/${location}/collections/${config.collectionId}/engines/${engineId}`;
 
-  const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
-  const client = await auth.getClient();
-  const token = (await client.getAccessToken()).token;
-  const restHeaders = {
-    'Authorization': `Bearer ${token}`,
-    'X-Goog-User-Project': projectId,
-    'Content-Type': 'application/json'
-  };
-
-  const mapModelsToResponse = (m: Record<string, string>) => ({
-    enable_gemini_2_5_pro: m['gemini-2.5-pro'] === 'MODEL_ENABLED',
-    enable_gemini_3_1_pro: m['gemini-3.1-pro-preview'] === 'MODEL_ENABLED',
-    enable_gemini_3_5_flash: m['gemini-3-flash-preview'] === 'MODEL_ENABLED',
-    enable_gemini_3_6_flash: m['gemini-3.1-flash-image-preview'] === 'MODEL_ENABLED' || m['gemini-3.1-flash-image'] === 'MODEL_ENABLED'
-  });
+  const existing = await fetchJson(baseUrl, { headers }, 'Get engine');
+  const current: Record<string, string> = existing.modelConfigs || {};
 
   if (action === 'get') {
-    const res = await fetch(baseUrl, { headers: restHeaders });
-    const data = await res.json();
-    const modelConfigs = data.modelConfigs || {};
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            status: 'SUCCESS',
-            engine_id: engineId,
-            model_availability: mapModelsToResponse(modelConfigs),
-            raw_model_configs: modelConfigs
-          }, null, 2)
-        }
-      ]
-    };
+    return textResult({ status: 'SUCCESS', engine_id: engineId, ...describeModels(current) });
   }
 
   if (action === 'update') {
-    const resGet = await fetch(baseUrl, { headers: restHeaders });
-    const existing = await resGet.json();
-    const modelConfigs = existing.modelConfigs || {};
-
-    const setState = (val: boolean | undefined, current: string) => {
-      if (val === undefined) return current || 'MODEL_ENABLED';
-      return val ? 'MODEL_ENABLED' : 'MODEL_DISABLED';
-    };
-
-    const modelKeys = [
-      'gemini-2.5-pro', 'gemini-3.1-pro-preview', 'gemini-3-flash-preview',
-      'gemini-3.6-flash', 'gemini-3.6-flash-preview', 'gemini-3.6-flash-001',
-      'gemini-3.6', 'gemini-3.6-flash-image', 'gemini-3.6-flash-image-preview',
-      'gemini-3-6-flash', 'gemini-3-6-flash-preview'
-    ];
-    if (args.enable_all_models === true) {
-      for (const k of modelKeys) modelConfigs[k] = 'MODEL_ENABLED';
-    } else if (args.disable_all_models === true) {
-      for (const k of modelKeys) modelConfigs[k] = 'MODEL_DISABLED';
-    } else {
-      if (args.enable_gemini_2_5_pro !== undefined) modelConfigs['gemini-2.5-pro'] = setState(args.enable_gemini_2_5_pro, modelConfigs['gemini-2.5-pro']);
-      if (args.enable_gemini_3_1_pro !== undefined) modelConfigs['gemini-3.1-pro-preview'] = setState(args.enable_gemini_3_1_pro, modelConfigs['gemini-3.1-pro-preview']);
-      if (args.enable_gemini_3_5_flash !== undefined) modelConfigs['gemini-3-flash-preview'] = setState(args.enable_gemini_3_5_flash, modelConfigs['gemini-3-flash-preview']);
-      if (args.enable_gemini_3_6_flash !== undefined) {
-        for (const k of modelKeys.slice(3)) modelConfigs[k] = setState(args.enable_gemini_3_6_flash, modelConfigs[k]);
-      }
-    }
-
-    const resPatch = await fetch(`${baseUrl}?updateMask=modelConfigs`, {
+    const modelConfigs = applyModelUpdates(current, args);
+    const updated = await fetchJson(`${baseUrl}?updateMask=modelConfigs`, {
       method: 'PATCH',
-      headers: restHeaders,
+      headers,
       body: JSON.stringify({ modelConfigs })
+    }, 'Update engine model configs');
+    return textResult({
+      status: 'SUCCESS',
+      message: `Model availability settings updated for app "${engineId}".`,
+      ...describeModels(updated.modelConfigs || {})
     });
-    const updated = await resPatch.json();
-    const updatedModels = updated.modelConfigs || {};
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            status: 'SUCCESS',
-            message: `Model availability settings updated for app "${engineId}".`,
-            model_availability: mapModelsToResponse(updatedModels),
-            raw_model_configs: updatedModels
-          }, null, 2)
-        }
-      ]
-    };
   }
 
   throw new Error(`Unsupported action "${action}" for gemini_enterprise_manage_models.`);
@@ -2437,172 +2364,69 @@ async function manageSearchUi(args: any): Promise<any> {
 
 async function manageAssistant(args: any): Promise<any> {
   const { projectId, location } = getGcpParams(args);
-  const parent = `projects/${projectId}/locations/${location}/collections/${config.collectionId}`;
   const engineId = args.engine_id;
-  const engineName = `${parent}/engines/${engineId}`;
+  if (!engineId) throw new Error('engine_id is required.');
   const action = args.action;
+  const headers = await getAuthHeaders(projectId);
+  const engineUrl = `${discoveryEngineBaseUrl(location, 'v1alpha')}/projects/${projectId}/locations/${location}/collections/${config.collectionId}/engines/${engineId}`;
+  const assistantUrl = `${engineUrl}/assistants/default_assistant`;
 
-  const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
-  const authClient = await auth.getClient();
-  const token = (await authClient.getAccessToken()).token;
-  const baseUrl = `https://global-discoveryengine.googleapis.com/v1alpha/${engineName}`;
-  const headers = {
-    'Authorization': `Bearer ${token}`,
-    'X-Goog-User-Project': projectId,
-    'Content-Type': 'application/json'
-  };
-
-  const resGet = await fetch(baseUrl, { headers });
-  const engine = await resGet.json();
-  const commonConfig = engine.commonConfig || {};
-  const companyStr = commonConfig.companyName || '';
-
-  let asstConfig: any = {
-    mode: 'Use default',
-    instruction: '',
-    enableWebGrounding: true,
-    webGroundingType: 'ENTERPRISE_WEB_SEARCH',
-    defaultWebSearchState: true,
-    enableLocationContext: true,
-    bannedPhrases: ['testbannedphrase'],
-    retentionDays: 60
-  };
-
-  if (companyStr.includes('|| ASST_CFG:')) {
-    try {
-      const parsed = JSON.parse(companyStr.split('|| ASST_CFG:')[1]);
-      asstConfig = { ...asstConfig, ...parsed };
-    } catch (e) {
-      // ignore JSON parse error and use default
-    }
-  }
+  const [engine, assistant] = await Promise.all([
+    fetchJson(engineUrl, { headers }, 'Get engine'),
+    fetchJson(assistantUrl, { headers }, 'Get assistant')
+  ]);
+  const legacy = parseLegacyCompanyName(engine.commonConfig?.companyName);
 
   if (action === 'get') {
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            status: 'SUCCESS',
-            engine_id: engineId,
-            assistant_options: {
-              additional_llm_system_instructions: {
-                mode: asstConfig.mode || 'Use default',
-                instruction: asstConfig.instruction || '',
-                description: 'Provide additional instructions for the LLM to follow. This could include style, formatting, tool use or anything that LLM needs to know more about your application.'
-              },
-              enable_web_grounding: {
-                enabled: asstConfig.enableWebGrounding !== false,
-                grounding_type: asstConfig.webGroundingType || 'ENTERPRISE_WEB_SEARCH',
-                description: 'Allow Gemini Enterprise to use web search results as answer sources. Enterprise web search (data residency compliant) or Google Search (not data residency compliant).'
-              },
-              default_web_search_state: {
-                enabled: asstConfig.defaultWebSearchState !== false,
-                description: 'Choose whether web search is turned on or off by default for new queries. Users can always change this setting for each search.'
-              },
-              enable_location_context: {
-                enabled: asstConfig.enableLocationContext !== false,
-                description: 'Allow the Gemini Enterprise app to use your location to improve the quality of responses.'
-              },
-              banned_phrases: {
-                count: (asstConfig.bannedPhrases || []).length,
-                phrases: asstConfig.bannedPhrases || ['testbannedphrase'],
-                description: "Configure banned phrases. If the query to the assistant or assistant response contains any of the banned phrases, the assistant's answer will be rejected."
-              },
-              chat_history_retention_period: {
-                days: asstConfig.retentionDays || 60,
-                description: 'The number of days to retain chat history for each new session.'
-              }
-            }
-          }, null, 2)
-        }
-      ]
-    };
+    return textResult({
+      status: 'SUCCESS',
+      engine_id: engineId,
+      assistant_options: describeAssistant(assistant, engine),
+      legacy_company_name_config_detected: legacy.config !== null
+    });
   }
 
-  if (action === 'update' || action === 'update_prompt_chips' || action === 'update_system_instruction') {
-    if (args.use_default_system_instruction === true) {
-      asstConfig.mode = 'Use default';
-      asstConfig.instruction = '';
-    } else if (args.system_instruction !== undefined) {
-      asstConfig.mode = 'Customize';
-      asstConfig.instruction = args.system_instruction;
+  if (action === 'update') {
+    if (args.prompt_chips !== undefined) {
+      throw new Error('prompt_chips is no longer supported: it was never persisted by the API.');
+    }
+    // Lossless migration: legacy values only fill gaps left by explicit arguments.
+    const effectiveArgs = legacy.config ? { ...legacyToArgs(legacy.config, args), ...args } : args;
+    const { assistant: patch, updateMask } = buildAssistantPatch(assistant, effectiveArgs);
+
+    let updatedAssistant = assistant;
+    if (updateMask.length > 0) {
+      updatedAssistant = await fetchJson(`${assistantUrl}?updateMask=${updateMask.join(',')}`, {
+        method: 'PATCH', headers, body: JSON.stringify(patch)
+      }, 'Update assistant');
     }
 
-    if (args.enable_all_assistant_features === true) {
-      asstConfig.enableWebGrounding = true;
-      asstConfig.webGroundingType = 'ENTERPRISE_WEB_SEARCH';
-      asstConfig.defaultWebSearchState = true;
-      asstConfig.enableLocationContext = true;
-    } else if (args.disable_all_assistant_features === true) {
-      asstConfig.enableWebGrounding = false;
-      asstConfig.defaultWebSearchState = false;
-      asstConfig.enableLocationContext = false;
-    } else {
-      if (args.enable_web_grounding !== undefined) {
-        asstConfig.enableWebGrounding = args.enable_web_grounding;
-      }
-      if (args.web_grounding_type !== undefined) {
-        asstConfig.webGroundingType = args.web_grounding_type;
-      }
-      if (args.default_web_search_state !== undefined) {
-        asstConfig.defaultWebSearchState = args.default_web_search_state;
-      }
-      if (args.enable_location_context !== undefined) {
-        asstConfig.enableLocationContext = args.enable_location_context;
-      }
-      if (args.banned_phrases !== undefined) {
-        asstConfig.bannedPhrases = args.banned_phrases;
-      }
-      if (args.chat_history_retention_days !== undefined) {
-        asstConfig.retentionDays = args.chat_history_retention_days;
-      }
+    let updatedEngine = engine;
+    const enginePatch: any = {};
+    const engineMask: string[] = [];
+    if (effectiveArgs.chat_history_retention_days !== undefined) {
+      const days = Number(effectiveArgs.chat_history_retention_days);
+      if (!Number.isInteger(days) || days < 1) throw new Error('chat_history_retention_days must be a positive integer.');
+      enginePatch.sessionConfig = { sessionTtl: { days } };
+      engineMask.push('sessionConfig.sessionTtl');
+    }
+    // Strip the legacy suffix only after the assistant update succeeded, so no setting is lost.
+    if (legacy.config !== null) {
+      enginePatch.commonConfig = { ...(engine.commonConfig || {}), companyName: legacy.prefix };
+      engineMask.push('commonConfig.companyName');
+    }
+    if (engineMask.length > 0) {
+      updatedEngine = await fetchJson(`${engineUrl}?updateMask=${engineMask.join(',')}`, {
+        method: 'PATCH', headers, body: JSON.stringify(enginePatch)
+      }, 'Update engine session/common config');
     }
 
-    const prefix = companyStr.split('|| ASST_CFG:')[0].trim() || 'My Organization';
-    commonConfig.companyName = `${prefix} || ASST_CFG:${JSON.stringify(asstConfig)}`;
-
-    const resPatch = await fetch(`${baseUrl}?updateMask=common_config`, {
-      method: 'PATCH',
-      headers,
-      body: JSON.stringify({ commonConfig })
+    return textResult({
+      status: 'SUCCESS',
+      message: `Assistant settings updated for app "${engineId}".`,
+      migrated_legacy_company_name_config: legacy.config !== null,
+      assistant_options: describeAssistant(updatedAssistant, updatedEngine)
     });
-    await resPatch.json();
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            status: 'SUCCESS',
-            message: `Assistant settings updated successfully for app "${engineId}".`,
-            assistant_options: {
-              additional_llm_system_instructions: {
-                mode: asstConfig.mode,
-                instruction: asstConfig.instruction
-              },
-              enable_web_grounding: {
-                enabled: asstConfig.enableWebGrounding,
-                grounding_type: asstConfig.webGroundingType
-              },
-              default_web_search_state: {
-                enabled: asstConfig.defaultWebSearchState
-              },
-              enable_location_context: {
-                enabled: asstConfig.enableLocationContext
-              },
-              banned_phrases: {
-                count: (asstConfig.bannedPhrases || []).length,
-                phrases: asstConfig.bannedPhrases
-              },
-              chat_history_retention_period: {
-                days: asstConfig.retentionDays
-              }
-            }
-          }, null, 2)
-        }
-      ]
-    };
   }
 
   throw new Error(`Unsupported action "${action}" for gemini_enterprise_manage_assistant.`);
@@ -2617,15 +2441,8 @@ async function manageObservability(args: any): Promise<any> {
   const engineName = `${parent}/engines/${engineId}`;
   const action = args.action;
 
-  const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
-  const authClient = await auth.getClient();
-  const token = (await authClient.getAccessToken()).token;
-  const baseUrl = `https://global-discoveryengine.googleapis.com/v1alpha/${engineName}`;
-  const headers = {
-    'Authorization': `Bearer ${token}`,
-    'X-Goog-User-Project': projectId,
-    'Content-Type': 'application/json'
-  };
+  const baseUrl = `${discoveryEngineBaseUrl(location, 'v1alpha')}/${engineName}`;
+  const headers = await getAuthHeaders(projectId);
 
   if (action === 'get') {
     const resGet = await fetch(baseUrl, { headers });
@@ -2737,15 +2554,8 @@ async function manageKnowledgeGraph(args: any): Promise<any> {
   const engineName = `${parent}/engines/${engineId}`;
   const action = args.action;
 
-  const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
-  const authClient = await auth.getClient();
-  const token = (await authClient.getAccessToken()).token;
-  const baseUrl = `https://global-discoveryengine.googleapis.com/v1alpha/${engineName}`;
-  const headers = {
-    'Authorization': `Bearer ${token}`,
-    'X-Goog-User-Project': projectId,
-    'Content-Type': 'application/json'
-  };
+  const baseUrl = `${discoveryEngineBaseUrl(location, 'v1alpha')}/${engineName}`;
+  const headers = await getAuthHeaders(projectId);
 
   if (action === 'get') {
     const resGet = await fetch(baseUrl, { headers });
@@ -2823,3 +2633,25 @@ async function manageKnowledgeGraph(args: any): Promise<any> {
   throw new Error(`Unsupported action "${action}" for gemini_enterprise_manage_knowledge_graph.`);
 }
 
+// 15. Long-running operation status
+const OPERATION_NAME = /^projects\/[^/]+\/locations\/([^/]+)\/(?:[^/]+\/[^/]+\/)*operations\/[^/]+$/;
+
+async function getOperation(args: any): Promise<any> {
+  const name = String(args.operation_name || '');
+  const match = OPERATION_NAME.exec(name);
+  if (!match || name.includes('..')) throw new Error('operation_name must be a full operation resource name (projects/.../locations/.../operations/...).');
+  const location = match[1];
+  const projectId = args.project_id || config.projectId || name.split('/')[1];
+  const headers = await getAuthHeaders(projectId);
+  const url = name.includes('/skills/')
+    ? `https://${location}-aiplatform.googleapis.com/v1beta1/${name}`
+    : `${discoveryEngineBaseUrl(location, 'v1alpha')}/${name}`;
+  const operation = await fetchJson(url, { headers }, 'Get operation');
+  return textResult({
+    status: operation.done ? (operation.error ? 'FAILED' : 'DONE') : 'RUNNING',
+    operation_name: name,
+    error: operation.error,
+    response: operation.response,
+    metadata: operation.metadata
+  });
+}

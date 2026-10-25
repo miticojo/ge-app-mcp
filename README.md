@@ -21,33 +21,31 @@ The server handles both **Data Plane** operations (semantic search, conversation
 The server provides complete (100% operational coverage) mapping to the core gRPC/REST endpoints of Google Cloud Discovery Engine:
 
 ### 🔍 Data Plane (Semantic Search & RAG)
-*   **Advanced Search (`gemini_enterprise_search`)**: Executes semantic queries on datastores, returning titles, snippets, URIs, and structured data formatted in clean Markdown for your agents.
-*   **Conversational Search (`gemini_enterprise_ask`)**: Queries the Answer API (Conversational RAG) receiving grounding answers, confidence scores, and structured references.
-*   **Document Retrieval (`gemini_enterprise_get_document`)**: Allows the agent to download the entire contents and structured metadata of an indexed document for in-depth analysis.
+*   **Search (`gemini_enterprise_search`)**: Semantic search on one data store (`datastore_id`) or across every source attached to an app (`engine_id`), with filters, ordering, relevance threshold, pagination and cost-saving `search_addon_spec`.
+*   **Grounded answers (`gemini_enterprise_ask`)**: Answer API with citations, grounding score, related questions and multi-turn sessions.
+*   **Document Retrieval (`gemini_enterprise_get_document`)**: Full content and metadata of an indexed document.
 
 ### ⚙️ Control Plane (Administration & Tuning)
-*   **App & Engine Management (`gemini_enterprise_manage_apps`)**: Complete CRUD and IAM operations to create, configure, retrieve, and set access policies for search and chat applications. LRO is fully supported.
-*   **DataStore Management (`gemini_enterprise_manage_datastore`)**: Instantiation and deletion of structured and unstructured Data Stores with custom industry verticals (e.g., `GENERIC`, `MEDIA`).
-*   **Advanced Web Search (`gemini_enterprise_manage_target_sites`)**: Management of target sites (URLs and glob patterns) for automatic website crawling.
-*   **Bulk Document Ingestion (`gemini_enterprise_manage_documents`)**: Asynchronous ingestion and purging of documents from Cloud Storage (`gs://...`) or BigQuery sources.
-*   **Custom Schema Management (`gemini_enterprise_manage_schema`)**: Upload, modification, and retrieval of JSON schemas for indexing structured documents.
-*   **Tuning & Controls (`gemini_enterprise_manage_controls`)**: Creation of boost/bury rules, synonyms, redirects, and filters on Serving Configs.
-*   **Feature Management (`gemini_enterprise_manage_features`)**: Programmatic toggling of end-user Web App capabilities (Agent Gallery, Agent Designer, Prompt Gallery, Model Selector, NotebookLM, Session Sharing, Memory).
-*   **Model Availability (`gemini_enterprise_manage_models`)**: Management of Gemini model availability toggles (Gemini 2.5 Pro, 3.1 Pro, 3.5 Flash, 3.6 Flash) with bulk controls.
-*   **Search UI & Shortcuts (`gemini_enterprise_manage_search_ui`)**: Management of autocomplete suggestions, user feedback rating widgets, and pinned link shortcuts.
-*   **Assistant & Prompts (`gemini_enterprise_manage_assistant`)**: Configuration of prompt chips, custom system instructions, web grounding, location context, banned phrases, and chat retention.
-*   **Observability & Analytics (`gemini_enterprise_manage_observability`)**: OpenTelemetry instrumentation, prompt logging, and query analytics tracking management.
-*   **Knowledge Graph (`gemini_enterprise_manage_knowledge_graph`)**: Configuration of Google Cloud Knowledge Graph and Private Knowledge Graph with bulk controls.
-*   **SaaS Connectors (`gemini_enterprise_configure_connector`)**: High-fidelity simulated flow with synchronization state management for Jira, Salesforce, and Confluence.
-*   **Agent Management (`gemini_enterprise_manage_agents`)**: End-to-end CRUD operations (create, list, delete, update) for native, server-side Gemini Enterprise Agents.
-*   **License & Billing Management (`gemini_enterprise_manage_licenses`)**: Programmatic management of user seats on Gemini Enterprise / Gemini Code Assist license pools.
+*   **Read-only inspection (`gemini_enterprise_inspect`, `gemini_enterprise_inspect_licenses`)**: Dedicated `readOnlyHint: true` tools covering every control-plane resource and license pool/usage check so audits and pre-change checks run in parallel with zero confirmation prompts inside Gemini Enterprise.
+*   **Apps (`gemini_enterprise_manage_apps`)**: CRUD and IAM for apps (engines).
+*   **Data stores (`gemini_enterprise_manage_datastore`)**: CRUD, resource-level IAM on data stores and connector collections, and project-level data store access control.
+*   **Connectors (`gemini_enterprise_configure_connector`)**: Real DataConnector API: get, setup, connector runs, and `citation_mappings` for custom MCP data stores.
+*   **Target sites, documents, schema, controls**: website crawling patterns, GCS/BigQuery import and purge, JSON schemas, boost/filter/synonym controls.
+*   **Feature toggles (`gemini_enterprise_manage_features`)**: All 38 web app toggles of the API (Projects, Workflow Builder, speech-to-text, Canvas, Skills, orchestration, ...), with a safe `enable_all_features` and `cleanup_invalid_keys`.
+*   **Models (`gemini_enterprise_manage_models`)**: Model availability (Gemini 4 Argon, 3.8/3.7/3.6 Flash, 3.1 Pro, image models, Claude Opus/Sonnet 5.5) plus a generic `model_configs` map.
+*   **Assistant (`gemini_enterprise_manage_assistant`)**: The real `default_assistant`: system instructions, models, web grounding, banned phrases, Model Armor, Sensitive Data Protection, Knowledge Catalog, chat history retention.
+*   **Search UI, observability, Knowledge Graph**: autocomplete, feedback, pinned links, OpenTelemetry and prompt logging, Knowledge Graph toggles.
+*   **Agents (`gemini_enterprise_manage_agents`)**: A2A, Agent Designer (low-code, multi-agent) and ADK agents on Agent Engine, with sharing scope and starter prompts.
+*   **Platform skills (`gemini_enterprise_manage_skills`)**: Vertex AI Skill Registry (create, get, retrieve, revisions, patch, delete).
+*   **Operations (`gemini_enterprise_get_operation`)**: Poll long-running operations returned by other tools.
+*   **Licenses (`gemini_enterprise_manage_licenses`)**: License pools, seat usage, assign and unassign.
 
 ---
 
 ## 🛠️ Installation & Setup
 
 ### 1. Prerequisites
-*   **Node.js**: v18.x or higher.
+*   **Node.js**: v22 or higher.
 *   **Google Cloud SDK (`gcloud`)** installed and configured.
 *   An active Google Cloud project with the **Discovery Engine API** enabled.
 
@@ -127,7 +125,7 @@ To ensure stability and facilitate onboarding, the repository includes a suite o
 
 ## 🏃 Running & Installing the Server
 
-The MCP server communicates via **stdio** transport. You can easily register it, compile it locally, or automate the entire setup.
+The MCP server communicates via **stdio** transport by default (see below for the remote HTTP mode). You can easily register it, compile it locally, or automate the entire setup.
 
 ### ⚡ Option A: Automatic Installation (Highly Recommended)
 You can automatically add and register `ge-app-mcp` in your favorite AI coding assistant (Claude Desktop, Cursor, Claude Code, etc.) using the open-source [add-mcp](https://github.com/neondatabase/add-mcp) utility:
@@ -153,6 +151,92 @@ npm start
 # In development with hot-reloading:
 npm run dev
 ```
+
+---
+
+## 🏢 Using the Server inside Gemini Enterprise (Cloud Run, on behalf of the user)
+
+Gemini Enterprise can call these tools as **actions** through a *Custom MCP Server* data store. In this mode
+the server runs on Cloud Run over Streamable HTTP and **every call is executed with the signed-in user's own
+Google OAuth token**: users can only do what their IAM roles allow, and audit logs show the real user.
+Local harnesses (Antigravity, Claude Code, Codex, Cursor...) are unaffected and keep using stdio.
+
+```mermaid
+sequenceDiagram
+    participant U as Admin
+    participant GE as Gemini Enterprise
+    participant CR as Cloud Run (ge-app-mcp)
+    participant API as Discovery Engine API
+    U->>GE: natural language request
+    GE->>CR: tools/call + X-Serverless-Authorization (GE service agent) + Authorization (user token)
+    CR->>CR: verify token (allowed OAuth client, scope, verified email)
+    CR->>API: call with the user's token
+    API-->>CR: 200, or 403 if the user lacks the role
+```
+
+**1. Allow Custom MCP data stores** (Organization Policy Administrator, project level):
+```bash
+cat > policy.yaml <<'YAML'
+name: projects/PROJECT_NUMBER/policies/discoveryengine.managed.disableCustomMcpServerConnector
+spec:
+  rules:
+  - enforce: false
+YAML
+gcloud org-policies set-policy policy.yaml --update-mask=spec
+```
+If the project is VPC-SC protected or listed in `enforcedProjects`, also add `custom_mcp` to
+`allowedDataSources` and the Cloud Run host plus `accounts.google.com` and `oauth2.googleapis.com` to `allowedEgressFqdns`.
+
+**2. Create an OAuth client** (Google Auth Platform, type *Web application*, consent screen *Internal*) with the
+redirect URI `https://vertexaisearch.cloud.google.com/oauth-redirect`.
+
+**3. Deploy to Cloud Run** (private service, runtime service account without roles):
+```bash
+gcloud iam service-accounts create ge-app-mcp-runtime --project=PROJECT_ID
+gcloud run deploy ge-app-mcp --source . --project=PROJECT_ID --region=REGION \
+  --no-allow-unauthenticated \
+  --service-account=ge-app-mcp-runtime@PROJECT_ID.iam.gserviceaccount.com \
+  --set-env-vars="^@^GCP_PROJECT=PROJECT_ID@MCP_SCOPES=search,admin,billing@ALLOWED_OAUTH_CLIENT_IDS=CLIENT_ID@ACCEPTED_OAUTH_SCOPES=https://www.googleapis.com/auth/discoveryengine.readwrite@ALLOWED_EMAIL_DOMAINS=example.com"
+gcloud run services add-iam-policy-binding ge-app-mcp --region=REGION --project=PROJECT_ID \
+  --member=serviceAccount:service-PROJECT_NUMBER@gcp-sa-discoveryengine.iam.gserviceaccount.com \
+  --role=roles/run.invoker
+```
+The image is built from the `Dockerfile` (distroless, non-root, `MCP_TRANSPORT=http`).
+
+**4. Create the data store** in the Gemini Enterprise console: *Data stores → Create → Custom MCP Server → OAuth 2.0*:
+
+| Field | Value |
+| :--- | :--- |
+| MCP Server URL | `https://<service>.run.app/mcp` (use the default `run.app` URL, not a custom domain) |
+| Authorization URL | `https://accounts.google.com/o/oauth2/v2/auth` |
+| Authorization URL Parameters | `&access_type=offline&prompt=consent` |
+| Token URL | `https://oauth2.googleapis.com/token` |
+| Client ID / Secret | from step 2 |
+| PKCE | enabled |
+| Scopes | `openid email https://www.googleapis.com/auth/discoveryengine.readwrite` |
+| MCP Server Description *(Advanced options)* | Short description of the server's capabilities so the assistant knows when to route requests to it |
+
+Then open *Actions → Reload custom actions*, select all discovered actions, click *Enable actions*, and connect the
+data store to the app used by your administrators (*Connected data stores → Add existing data stores*). On first use
+in the Gemini Enterprise web app, each administrator opens *Sources / Connectors* in the chat bar and clicks
+**Authorize** next to the connector to complete per-user OAuth consent. Read-only tools (`search`, `ask`,
+`get_document`, `get_operation`, `inspect`, `inspect_licenses`) run in parallel without a confirmation prompt;
+mutating actions (`manage_*`, `configure_connector`) show a `Review` card (**Send** / **Cancel**) and run sequentially.
+
+**5. Grant roles to administrators**: their usual Discovery Engine roles plus
+`roles/serviceusage.serviceUsageConsumer` on the project (the server sends `x-goog-user-project`).
+
+> [!IMPORTANT]
+> Security model: the server never uses its own identity in HTTP mode (no token → 401), only accepts tokens
+> minted for `ALLOWED_OAUTH_CLIENT_IDS`, and logs one line per tool call (tool, action, user, outcome) without
+> arguments or tokens. Restrict who sees the actions with data store IAM
+> (`gemini_enterprise_manage_datastore` → `set-iam`, `set-resource-access-control`) or a dedicated admin app.
+> `gemini_enterprise_manage_skills` needs the `cloud-platform` scope and is hidden when only
+> `discoveryengine.readwrite` is accepted. See [ADR-0003](docs/adr/0003-remote-http-transport-with-end-user-oauth.md).
+
+The distributed skills can be imported into the Gemini Enterprise web app (*Skills → Add skill → Upload skill*,
+select `SKILL.md` → **Import**), invoked in chat with `/<skill-name>` (e.g. `/admin-assistant`), and shared with
+other administrators.
 
 ---
 
@@ -210,8 +294,12 @@ ge-app-mcp/
 ├── package.json
 ├── tsconfig.json
 ├── src/
-│   ├── index.ts               # MCP Server entrypoint (tool routing)
-│   ├── config.ts              # GCP environment variable configuration
+│   ├── index.ts               # MCP Server entrypoint (tool routing, stdio/http)
+│   ├── config.ts              # Environment configuration
+│   ├── gcp.ts                 # Request-scoped credentials and REST helpers
+│   ├── http.ts                # Streamable HTTP transport and token verification
+│   ├── annotations.ts         # MCP tool annotations
+│   ├── domain/                # Pure domain logic (features, models, assistant, licensing, citations)
 │   └── tools/
 │       ├── search.ts          # Search tool implementations (Data Plane)
 │       ├── admin.ts           # Admin tool implementations (Control Plane)
@@ -221,8 +309,10 @@ ge-app-mcp/
     │   └── SKILL.md           # Skill for DevOps and infrastructure orchestration
     ├── enterprise-context/
     │   └── SKILL.md           # Skill for secure zero-trust enterprise search
-    └── codebase-rag/
-        └── SKILL.md           # Skill for debugging and conversational code context
+    ├── codebase-rag/
+    │   └── SKILL.md           # Skill for debugging and conversational code context
+    └── agent-workflow-architect/
+        └── SKILL.md           # Skill for designing and governing agents and platform skills
 ```
 
 ---

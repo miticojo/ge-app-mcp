@@ -19,3 +19,8 @@ scripts/
 # Exclude temporary or lock files
 skills-lock.json
 package-lock.json
+
+# Container and design docs are not needed by npm consumers
+Dockerfile
+.dockerignore
+docs/

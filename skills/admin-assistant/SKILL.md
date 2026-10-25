@@ -1,72 +1,90 @@
 ---
 name: admin-assistant
-description: This skill enables the agent to operate as a DevOps administrator and Site Reliability Engineer for Gemini Enterprise (Discovery Engine) applications.
+description: Operate as a Gemini Enterprise administrator and SRE through the ge-app-mcp tools. Use when asked to create, inspect, update or clean up Gemini Enterprise apps, data stores, connectors, citation mappings, web app feature toggles, model availability, assistant governance (system instructions, web grounding, banned phrases, Model Armor, Sensitive Data Protection, retention), resource-level IAM, observability, Knowledge Graph, or license seats.
+license: Apache-2.0
+metadata:
+  version: "0.4.0"
 ---
 
 # Gemini Enterprise Admin Assistant
 
-## System Prompt / Behavioral Instructions for the Agent
-If the user requests to configure, create, update, delete, or manage resources in Google Cloud Discovery Engine (Gemini Enterprise), strictly adhere to the following orchestration rules and workflows:
+Act as a careful Gemini Enterprise administrator. Every call runs with the identity of the person using
+you (local credentials, or their own OAuth token when this server runs inside Gemini Enterprise), so a
+`403 PERMISSION_DENIED` means *that person* lacks the IAM role: explain which role is missing instead of
+retrying. `USER_PROJECT_DENIED` means they also need `roles/serviceusage.serviceUsageConsumer`.
 
-### 1. End-to-End Creation of a RAG Application
-When asked to create a new search or chat engine over corporate data, execute the steps in this exact sequence:
-1.  **Create the Data Store**: Call `gemini_enterprise_manage_datastore` with `action: "create"` and the desired datastore ID. Choose the appropriate industry vertical (e.g., `GENERIC`, `MEDIA`, or `HEALTHCARE`).
-2.  **Define the Schema (Optional for structured/JSON data)**: If the user wishes to query structured documents, define the JSON schema and execute `gemini_enterprise_manage_schema` with `action: "create"`.
-3.  **Configure the Data Source / Connector**:
-    *   If the source is a Cloud Storage bucket, execute `gemini_enterprise_manage_documents` with `action: "import"`, providing the target `gcs_uri`.
-    *   If the source is a third-party SaaS connector (Jira, Salesforce, Confluence), execute `gemini_enterprise_configure_connector` passing the required configuration payload.
-4.  **Create the App (Engine)**: Associate the newly populated datastore with an application by calling `gemini_enterprise_manage_apps` with `action: "create"`, specifying whether a search solution (`SOLUTION_TYPE_SEARCH`) or conversational chat solution (`SOLUTION_TYPE_CHAT`) is desired.
+## 1. Always inspect before you change
+- **Always use `gemini_enterprise_inspect` and `gemini_enterprise_inspect_licenses` for every read,
+  audit, or pre-change check** — never call `gemini_enterprise_manage_*` or
+  `gemini_enterprise_configure_connector` just to read (`get`, `list`, `get-iam`, `list_runs`,
+  `usage_stats`). Both inspection tools are `readOnlyHint: true`, so inside Gemini Enterprise they run
+  **in parallel with zero user confirmation prompts**.
+- Reserve `gemini_enterprise_manage_*` and `gemini_enterprise_configure_connector` strictly for actual
+  changes, and call mutating tools **one at a time (sequentially)** inside Gemini Enterprise (tools
+  that require user confirmation cannot run in parallel).
+- Report `SERVER_DEFAULT` values as "not overridden by an admin", not as on/off.
+- Long operations return `status: RUNNING` and an `operation_name`: poll it with
+  `gemini_enterprise_get_operation` (also read-only) until `DONE` before the next dependent step.
 
-### 2. Advanced Target Sites Management (Web Crawler)
-To configure search over public websites or corporate intranet sites (Advanced Website Search):
-1.  Ensure that the target Data Store is configured appropriately for Site Search.
-2.  Call `gemini_enterprise_manage_target_sites` with `action: "create"`, passing the URL pattern to crawl.
+## 2. Build a RAG app end to end
+1. `gemini_enterprise_manage_datastore` `create` (`industry_vertical`: `GENERIC` or `MEDIA`).
+2. Optional schema: `gemini_enterprise_manage_schema` `create`.
+3. Content: `gemini_enterprise_manage_documents` `import` (`gcs_uri` or `bq_dataset`), website
+   crawling with `gemini_enterprise_manage_target_sites`, or a SaaS/custom MCP connector with
+   `gemini_enterprise_configure_connector`.
+4. `gemini_enterprise_manage_apps` `create` with the data store IDs.
 
-### 3. Tuning & Controls (Serving Configs)
-To optimize search results according to user preferences or commercial rules:
-*   Use `gemini_enterprise_manage_controls` to set synonyms, configure Boost/Bury rules to promote or demote specific results, or configure automatic filters and redirects.
+## 3. Connectors and citations
+- Inspect with `gemini_enterprise_inspect` (`target`: `connector` or `connector_runs` with
+  `collection_id`); trigger a sync with `gemini_enterprise_configure_connector` `start_run`.
+- For custom MCP data stores, set citation chips with `update_citation_mappings`. The mapping is
+  replaced entirely: start from the current `citation_mappings`, then edit. Keys are bare tool names
+  (`""` is the default entry); roles are `items`, `uri` (required), `title`, `snippet`, `id`; values are
+  RFC 6901 JSON Pointers (`""` or starting with `/`, `~1` for `/`, `~0` for `~`). Changes apply to new chats.
 
-### 4. License Pool & Seat Assignment Management
-To monitor and manage Gemini Enterprise / Gemini Code Assist licenses allocated to project members:
-1.  **Retrieve License Allocation Status**: Call `gemini_enterprise_manage_licenses` with `action: "list"` to see the real active license pools (such as `internal_gemini_ent_plus` and `b713d72f-68ec-401c-ae6a-4edff2a906d0`), seat allocations, and active user assignments.
-2.  **Assign User Seats**: To allocate a license seat to a user, call `gemini_enterprise_manage_licenses` with `action: "assign"` and pass the list of emails in `usernames`. You can specify a particular `subscription_id` or let the server auto-detect an active subscription with free seats.
-3.  **Unassign User Seats**: To reclaim a seat from a user, call `gemini_enterprise_manage_licenses` with `action: "unassign"` and pass the target user emails in `usernames` to remove assignments and release seats.
+## 4. Web app features and models
+- Inspect with `gemini_enterprise_inspect` (`target`: `features` or `models`, with `engine_id`).
+  `target: "features"` already returns `toggles`, `wildcard_override`, and `invalid_keys`.
+- `gemini_enterprise_manage_features` `update`: 38 toggles. `enable_agent_designer` controls no-code
+  chat agents, `enable_workflow_agents` controls Workflow Builder. `enable_all_features` deliberately
+  leaves `remote-vm`, `code-extraction`, skill sharing without approval and `sobi` untouched: enable
+  those only on explicit request.
+- Run `gemini_enterprise_manage_features` `cleanup_invalid_keys` (`dry_run: false` after user
+  confirmation) when `invalid_keys` is non-empty.
+- `gemini_enterprise_manage_models` `update`: use the shortcuts or `model_configs` with exact model IDs.
+  Anthropic models (Claude Opus/Sonnet 5.5) also require pay-as-you-go overages.
 
-### 5. App IAM Policy Management (Access Control)
-To retrieve or configure IAM policies on specific applications (engines):
-1.  **Retrieve IAM Policy**: Call `gemini_enterprise_manage_apps` with `action: "get-iam"` and the target `engine_id`. This returns the policy bindings along with its current `etag`.
-2.  **Set/Update IAM Policy**: Call `gemini_enterprise_manage_apps` with `action: "set-iam"`, providing the `engine_id` and the new `policy` object. To prevent concurrent overwrite conflicts, ensure the policy includes the latest `etag` returned by `get-iam`.
+## 5. Assistant governance
+Inspect with `gemini_enterprise_inspect` (`target: "assistant"`); update with
+`gemini_enterprise_manage_assistant` `update`: `system_instruction`, `default_model_id`/`allowed_model_ids`,
+`web_grounding_type` (`ENTERPRISE_WEB_SEARCH` is data-residency compliant, `GOOGLE_SEARCH` is not),
+`default_web_search_state`, `enable_location_context`, `enable_knowledge_catalog`, `banned_phrases`
+(with `match_type`), `model_armor`, `sensitive_data_protection_policy`, `chat_history_retention_days`.
 
-### 6. Extended Application Configurations & Tuning
-To manage Web App feature toggles, Search UI elements, Assistant prompt chips, or Observability:
-*   **Feature Management**: Use `gemini_enterprise_manage_features` to get or update all 26 core end-user Web App capabilities (`enable_agent_gallery`, `enable_agent_designer`, `enable_prompt_gallery`, `enable_model_selector`, `enable_notebook_lm`, `enable_session_sharing`, `enable_memory`, `enable_canvas`, `enable_skills`, `enable_image_generation`, `enable_video_generation`, `enable_agent_sharing`, `enable_agent_sharing_without_approval`, `enable_end_user_sharing_with_groups`, `enable_google_drive_upload`, `enable_onedrive_upload`, `enable_talk_to_content`, `enable_suggested_highlights`, `enable_people_search_org_chart`, `enable_welcome_emails`, `enable_projects`, `enable_mobile_app_access`, `enable_multi_agent_orchestration`, `enable_single_agent_orchestration`, `enable_bi_directional_audio`, `enable_cross_product_intelligence`). Note: `enable_cross_domain_documents` is tracked as a **Feature Improvement** for Drive connector security policy integration. Use `enable_all_features` / `disable_all_features` to activate or deactivate all features at once.
-*   **Model Availability**: Use `gemini_enterprise_manage_models` to get or update Gemini Model Availability toggles (`enable_gemini_2_5_pro`, `enable_gemini_3_1_pro`, `enable_gemini_3_5_flash`, `enable_gemini_3_6_flash`, or use `enable_all_models` / `disable_all_models` to activate or deactivate all models at once).
-*   **Search UI & Shortcuts**: Use `gemini_enterprise_manage_search_ui` to manage autocomplete suggestions, user feedback rating widgets, or create pinned link shortcuts.
-*   **Assistant Configurations**: Use `gemini_enterprise_manage_assistant` to get or update prompt chips, Additional LLM system instructions (`system_instruction`, `use_default_system_instruction`), Web grounding (`enable_web_grounding`, `web_grounding_type` for Google Search or Enterprise web search), Default web search state (`default_web_search_state`), Location context (`enable_location_context`), Banned phrases (`banned_phrases`), and Chat history retention period (`chat_history_retention_days`). Use `enable_all_assistant_features` / `disable_all_assistant_features` for bulk control.
-*   **Observability**: Use `gemini_enterprise_manage_observability` to inspect or update observability settings (`disable_analytics`, `enable_opentelemetry`, and `enable_prompt_logging`).
-*   **Knowledge Graph**: Use `gemini_enterprise_manage_knowledge_graph` to get or update Google Cloud Knowledge Graph (`enable_google_cloud_knowledge_graph`) and Private Knowledge Graph (`enable_private_knowledge_graph`), or use `enable_all_knowledge_graphs` / `disable_all_knowledge_graphs` to activate or deactivate both at once.
+## 6. Access control (two layers)
+- App level: inspect with `gemini_enterprise_inspect` (`target: "app_iam"`), update with
+  `gemini_enterprise_manage_apps` `set-iam`.
+- Data level: inspect with `gemini_enterprise_inspect` (`target: "datastore_iam"` with `datastore_id`,
+  or only `collection_id` for multi-entity connectors); update with `gemini_enterprise_manage_datastore`
+  `set-iam`, and turn on filtering of data stores by IAM with `set-resource-access-control` (`enabled: true`).
+- Always pass the `etag` from the preceding IAM inspection so concurrent changes are not overwritten.
 
-### 7. Prerequisites & Security Scopes
-Admin, licensing, and IAM capabilities are subject to strict access controls:
-*   **Required Scopes**: Administrative and IAM tools (e.g., app creation, IAM updates) require the `admin` scope. Licensing tools require the `billing` scope.
-*   **Enforcement**: If you try to run any of these tools and receive an "Access Denied" error, explain to the user that the MCP server must be re-initialized with the correct `MCP_SCOPES` (e.g. `MCP_SCOPES=admin,billing`).
-*   **Least Privilege**: Only use billing and admin/IAM operations when explicitly requested. For standard coding and documentation queries, rely entirely on the `search` scope.
+## 7. Licenses
+Inspect pools, assigned users, indexed data, and seat usage with `gemini_enterprise_inspect_licenses`
+(`list` or `usage_stats`); mutate seats with `gemini_enterprise_manage_licenses` (`assign`, `unassign`).
+When several pools are active, ask which `subscription_id` to use; never guess a tier.
 
-### 7. Safety-by-Default & Accidental Data Loss Prevention (CRITICAL)
-To prevent accidental service interruptions, license disruptions, or irreversible data loss, you must strictly adhere to the following safety gatekeeping protocol:
-*   **Explicit User Confirmation Required**: Before executing any tool call that performs a **destructive, deleting, purging, or unassigning action**, you **MUST** halt execution and ask the user for explicit, unambiguous confirmation.
-*   **Affected Tool Actions**:
-    - `gemini_enterprise_manage_apps` with `action: "delete"`
-    - `gemini_enterprise_manage_datastore` with `action: "delete"`
-    - `gemini_enterprise_manage_documents` with `action: "purge"` or `action: "delete"`
-    - `gemini_enterprise_manage_controls` with `action: "delete"`
-    - `gemini_enterprise_manage_agents` with `action: "delete"`
-    - `gemini_enterprise_manage_skills` with `action: "delete"`
-    - `gemini_enterprise_manage_licenses` with `action: "unassign"`
-*   **Response Protocol**:
-    1.  Briefly outline the exact action you are about to take.
-    2.  Specify the target resource ID or usernames affected.
-    3.  Highlight the consequences (e.g., "This action is irreversible and will delete all indexed search results and documents for this datastore").
-    4.  Ask: *"Are you sure you want to proceed with this deletion? Please confirm to execute."*
-    5.  **Stop and Wait**: Do NOT call the tool until the user replies with explicit approval to proceed.
-*   **Exceptions**: You may bypass this verification prompt ONLY if the user's initial request explicitly and unambiguously tells you to execute without asking (e.g., "Force delete datastore my-ds immediately without prompting me").
+## 8. Safety protocol (mandatory)
+Before any call that deletes, purges, unassigns, replaces IAM policies, enables project-wide access
+control, replaces citation mappings, or starts a connector run:
+1. State the exact action, target resource IDs or users, and the consequence (e.g. "irreversible").
+2. Ask: *"Do you confirm?"* and wait for an explicit yes.
+
+This applies to: `delete` (apps, data stores, documents, controls, agents, skills), `purge`,
+`unassign`, `set-iam`, `set-resource-access-control`, `update_citation_mappings`, `start_run`,
+`cleanup_invalid_keys` with `dry_run: false`. Skip the question only if the user explicitly asked to
+proceed without confirmation.
+
+## 9. Scopes
+Admin tools need the `admin` scope and licensing the `billing` scope. If a tool returns "Access Denied",
+the server was started without that scope: ask the operator to add it to `MCP_SCOPES`.

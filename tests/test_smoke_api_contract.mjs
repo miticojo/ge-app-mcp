@@ -36,9 +36,9 @@ const EXPECTED_GCP_MAPPINGS = {
     requiredArgs: ['action']
   },
   gemini_enterprise_configure_connector: {
-    client: 'DataStoreServiceClient',
-    proto: 'google.cloud.discoveryengine.v1.DataStore',
-    requiredArgs: ['datastore_id', 'connector_type', 'config_payload']
+    client: null, // REST only: DataConnector is not exposed by the Node SDK
+    proto: 'google.cloud.discoveryengine.v1.DataConnector',
+    requiredArgs: ['action', 'collection_id']
   },
   gemini_enterprise_manage_target_sites: {
     client: 'SiteSearchEngineServiceClient',
@@ -100,10 +100,25 @@ const EXPECTED_GCP_MAPPINGS = {
     proto: 'google.cloud.discoveryengine.v1.Engine',
     requiredArgs: ['action', 'engine_id']
   },
+  gemini_enterprise_get_operation: {
+    client: null, // REST: google.longrunning.Operations
+    proto: 'google.longrunning.Operation',
+    requiredArgs: ['operation_name']
+  },
   gemini_enterprise_manage_knowledge_graph: {
     client: 'EngineServiceClient',
     proto: 'google.cloud.discoveryengine.v1.Engine',
     requiredArgs: ['action', 'engine_id']
+  },
+  gemini_enterprise_inspect: {
+    client: 'EngineServiceClient',
+    proto: 'google.cloud.discoveryengine.v1.Engine',
+    requiredArgs: ['target']
+  },
+  gemini_enterprise_inspect_licenses: {
+    client: 'UserLicenseServiceClient',
+    proto: 'google.cloud.discoveryengine.v1.UserLicense',
+    requiredArgs: ['action']
   }
 };
 
