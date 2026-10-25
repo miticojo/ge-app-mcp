@@ -367,8 +367,8 @@ export const adminTools: any[] = [
       properties: {
         action: {
           type: 'string',
-          enum: ['create', 'list', 'delete', 'patch'],
-          description: 'The administrative skill action to perform: create, list, delete, or patch.'
+          enum: ['create', 'list', 'get', 'retrieve', 'list_revisions', 'delete', 'patch'],
+          description: 'create, list, get, retrieve (semantic lookup by query), list_revisions, delete, or patch. create/patch/delete return an operation: poll it with gemini_enterprise_get_operation before changing the skill again.'
         },
         skill_id: {
           type: 'string',
@@ -381,6 +381,14 @@ export const adminTools: any[] = [
         description: {
           type: 'string',
           description: 'A detailed description of what the skill does.'
+        },
+        query: {
+          type: 'string',
+          description: 'For retrieve. Natural language query used to find relevant skills.'
+        },
+        top_k: {
+          type: 'number',
+          description: 'For retrieve. Maximum number of skills to return.'
         },
         zipped_filesystem: {
           type: 'string',
@@ -1912,6 +1920,7 @@ async function manageSkills(args: any): Promise<any> {
   const projectId = args.project_id || config.projectId;
   const location = args.location || 'us-central1';
   const { action, skill_id, display_name, description, zipped_filesystem } = args;
+  if (skill_id !== undefined && !RESOURCE_ID.test(skill_id)) throw new Error('Invalid skill_id.');
 
   if (!projectId) {
     throw new Error('Google Cloud Project ID is required.');
@@ -1943,6 +1952,26 @@ async function manageSkills(args: any): Promise<any> {
           }
         ]
       };
+    }
+
+    case 'get': {
+      if (!skill_id) throw new Error('skill_id is required for get action.');
+      const skill = await fetchJson(`${baseUrl}/${skill_id}`, { headers }, 'Get skill');
+      return textResult({ status: 'SUCCESS', skill });
+    }
+
+    case 'retrieve': {
+      if (!args.query) throw new Error('query is required for retrieve action.');
+      const params = new URLSearchParams({ query: String(args.query) });
+      if (args.top_k !== undefined) params.set('topK', String(Math.max(1, Math.floor(Number(args.top_k)))));
+      const data = await fetchJson(`${baseUrl}:retrieve?${params}`, { headers }, 'Retrieve skills');
+      return textResult({ status: 'SUCCESS', retrieved_skills: data.retrievedSkills || [] });
+    }
+
+    case 'list_revisions': {
+      if (!skill_id) throw new Error('skill_id is required for list_revisions action.');
+      const data = await fetchJson(`${baseUrl}/${skill_id}/revisions`, { headers }, 'List skill revisions');
+      return textResult({ status: 'SUCCESS', revisions: data.revisions || data.skillRevisions || [], next_page_token: data.nextPageToken });
     }
 
     case 'create': {
