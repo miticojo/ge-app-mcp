@@ -1,103 +1,65 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import assert from 'node:assert/strict';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+// Live, reversible test of gemini_enterprise_manage_assistant against the real
+// default_assistant resource. Only the additional system instruction is changed
+// and it is restored to its original value at the end.
+const __dirname = dirname(fileURLToPath(import.meta.url));
 const serverPath = join(__dirname, '../build/index.js');
 
-const targetEngineId = process.env.TARGET_ENGINE_ID || 'tes';
+const targetEngineId = process.env.TARGET_ENGINE_ID;
+if (!targetEngineId) {
+  console.error('TARGET_ENGINE_ID is required (no default: test engines change over time).');
+  process.exit(1);
+}
 
 const transport = new StdioClientTransport({
   command: 'node',
   args: [serverPath],
   env: {
     ...process.env,
-    PATH: `/opt/homebrew/bin:${process.env.PATH}`,
     GCP_PROJECT: process.env.GCP_PROJECT || 'giorgioc-cloud-apps',
     GCP_LOCATION: process.env.GCP_LOCATION || 'global',
     GCP_COLLECTION: process.env.GCP_COLLECTION || 'default_collection',
-    GOOGLE_CLOUD_QUOTA_PROJECT: process.env.GOOGLE_CLOUD_QUOTA_PROJECT || 'giorgioc-cloud-apps',
-    MCP_SCOPES: process.env.MCP_SCOPES || 'search,admin,billing',
+    MCP_SCOPES: 'admin'
   }
 });
+const client = new Client({ name: 'test-assistant-suite', version: '1.0.0' }, { capabilities: {} });
 
-const client = new Client({
-  name: 'test-assistant-suite',
-  version: '1.0.0'
-}, {
-  capabilities: {}
-});
+async function call(args) {
+  const res = await client.callTool({ name: 'gemini_enterprise_manage_assistant', arguments: { engine_id: targetEngineId, ...args } });
+  if (res.isError) throw new Error(res.content[0].text);
+  return JSON.parse(res.content[0].text);
+}
 
 async function run() {
-  console.log(`🌌 Testing comprehensive Assistant options via MCP on app "${targetEngineId}"...\n`);
+  console.log(`🌌 Assistant live test on app "${targetEngineId}"`);
   await client.connect(transport);
 
-  console.log('--- 1. CONFIGURING ALL ASSISTANT OPTIONS (Customize System Instruction, Web Grounding, Location, Banned Phrases, Retention) ---');
-  const resUpdate = await client.callTool({
-    name: 'gemini_enterprise_manage_assistant',
-    arguments: {
-      action: 'update',
-      engine_id: targetEngineId,
-      system_instruction: 'You are a helpful Gemini Enterprise AI assistant.',
-      enable_web_grounding: true,
-      web_grounding_type: 'ENTERPRISE_WEB_SEARCH',
-      default_web_search_state: true,
-      enable_location_context: true,
-      banned_phrases: ['testbannedphrase', 'parolaproibita'],
-      chat_history_retention_days: 90
-    }
-  });
-  console.log('✅ Update Result:', JSON.parse(resUpdate.content[0].text).message);
+  const before = (await call({ action: 'get' })).assistant_options;
+  const original = before.additional_system_instruction || '';
+  console.log('✓ get: web grounding =', before.web_grounding_type);
 
-  console.log('\n--- 2. VERIFYING ASSISTANT OPTIONS (action: "get") ---');
-  const resGet1 = await client.callTool({
-    name: 'gemini_enterprise_manage_assistant',
-    arguments: { action: 'get', engine_id: targetEngineId }
-  });
-  const get1Data = JSON.parse(resGet1.content[0].text).assistant_options;
-  console.log('======================================================');
-  console.log('          ASSISTANT CONFIGURATION STATUS');
-  console.log('======================================================');
-  console.log('System Instruction Mode  :', get1Data.additional_llm_system_instructions.mode);
-  console.log('System Instruction Text  :', get1Data.additional_llm_system_instructions.instruction);
-  console.log('Web Grounding Enabled    :', get1Data.enable_web_grounding.enabled ? '✅ ENABLED' : '❌ DISABLED');
-  console.log('Web Grounding Type       :', get1Data.enable_web_grounding.grounding_type);
-  console.log('Default Web Search State :', get1Data.default_web_search_state.enabled ? '✅ ENABLED' : '❌ DISABLED');
-  console.log('Location Context         :', get1Data.enable_location_context.enabled ? '✅ ENABLED' : '❌ DISABLED');
-  console.log('Banned Phrases Count     :', get1Data.banned_phrases.count, `(${get1Data.banned_phrases.phrases.join(', ')})`);
-  console.log('Chat History Retention   :', `${get1Data.chat_history_retention_period.days} days`);
-  console.log('======================================================');
+  const marker = `[ge-app-mcp test ${Date.now()}]`;
+  const updated = await call({ action: 'update', system_instruction: marker });
+  assert.equal(updated.assistant_options.additional_system_instruction, marker);
+  console.log('✓ update persisted on the real Assistant resource');
 
-  console.log('\n--- 3. TESTING RESET / USE DEFAULT (use_default_system_instruction: true, disable_all_assistant_features: true) ---');
-  await client.callTool({
-    name: 'gemini_enterprise_manage_assistant',
-    arguments: {
-      action: 'update',
-      engine_id: targetEngineId,
-      use_default_system_instruction: true,
-      disable_all_assistant_features: true,
-      chat_history_retention_days: 60
-    }
-  });
-
-  console.log('\n--- 4. VERIFYING RESET STATUS (action: "get") ---');
-  const resGet2 = await client.callTool({
-    name: 'gemini_enterprise_manage_assistant',
-    arguments: { action: 'get', engine_id: targetEngineId }
-  });
-  const get2Data = JSON.parse(resGet2.content[0].text).assistant_options;
-  console.log('System Instruction Mode  :', get2Data.additional_llm_system_instructions.mode);
-  console.log('Web Grounding Enabled    :', get2Data.enable_web_grounding.enabled ? '✅ ENABLED' : '❌ DISABLED');
-  console.log('Chat History Retention   :', `${get2Data.chat_history_retention_period.days} days`);
+  const restored = original
+    ? await call({ action: 'update', system_instruction: original })
+    : await call({ action: 'update', use_default_system_instruction: true });
+  assert.equal(restored.assistant_options.additional_system_instruction, original);
+  console.log('✓ original system instruction restored');
 
   await client.close();
-  console.log('\n🎉 Assistant MCP Tool Test Suite Completed Successfully!');
+  console.log('\n🎉 Assistant live test passed');
   process.exit(0);
 }
 
 run().catch((err) => {
-  console.error('❌ Test Error:', err);
+  console.error('❌ Test Error:', err.message);
   process.exit(1);
 });

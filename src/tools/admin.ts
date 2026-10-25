@@ -10,6 +10,7 @@ import {
 import { config } from '../config.js';
 import { applyFeatureUpdates, describeFeatures, findInvalidFeatureKeys, featureToggleSchemaProperties } from '../domain/engineFeatures.js';
 import { applyModelUpdates, describeModels, modelSchemaProperties } from '../domain/engineModels.js';
+import { buildAssistantPatch, describeAssistant, legacyToArgs, parseLegacyCompanyName } from '../domain/assistantConfig.js';
 import { getAuthHeaders, gapicClientOptions, discoveryEngineHost, discoveryEngineBaseUrl, fetchJson } from '../gcp.js';
 
 // Define MCP Tool schemas
@@ -485,74 +486,47 @@ export const adminTools: any[] = [
   },
   {
     name: 'gemini_enterprise_manage_assistant',
-    description: 'Manage Gemini Enterprise Assistant configurations, system instructions, and prompt chips.',
+    description: 'Get or update Gemini Enterprise assistant governance (default_assistant): system instructions, models, web grounding, location context, Knowledge Catalog, banned phrases, Model Armor, Sensitive Data Protection and chat history retention.',
     inputSchema: {
       type: 'object',
       properties: {
-        action: {
-          type: 'string',
-          enum: ['get', 'update', 'update_prompt_chips', 'update_system_instruction'],
-          description: 'The action to perform: get, update, update_prompt_chips, or update_system_instruction.'
-        },
-        project_id: {
-          type: 'string',
-          description: 'Optional. Google Cloud Project ID.'
-        },
-        location: {
-          type: 'string',
-          description: 'Optional. Google Cloud Region.'
-        },
-        engine_id: {
-          type: 'string',
-          description: 'ID of the app/engine. Required.'
-        },
-        prompt_chips: {
-          type: 'array',
-          items: { type: 'string' },
-          description: 'List of prompt chip text suggestions for the assistant UI.'
-        },
-        system_instruction: {
-          type: 'string',
-          description: 'System instruction prompt for the assistant AI model (Customize Additional LLM system instructions).'
-        },
-        use_default_system_instruction: {
-          type: 'boolean',
-          description: 'Set to true to select "Use default" for Additional LLM system instructions, or false to Customize.'
-        },
-        enable_web_grounding: {
-          type: 'boolean',
-          description: 'Enable or disable web grounding (allow Gemini Enterprise to use web search results as answer sources).'
-        },
-        web_grounding_type: {
-          type: 'string',
-          enum: ['GOOGLE_SEARCH', 'ENTERPRISE_WEB_SEARCH'],
-          description: 'Choose "GOOGLE_SEARCH" (not data residency compliant) or "ENTERPRISE_WEB_SEARCH" (data residency compliant).'
-        },
-        default_web_search_state: {
-          type: 'boolean',
-          description: 'Choose whether web search is turned on or off by default for new queries.'
-        },
-        enable_location_context: {
-          type: 'boolean',
-          description: 'Allow the Gemini Enterprise app to use your location to improve response quality.'
-        },
+        action: { type: 'string', enum: ['get', 'update'], description: 'get or update.' },
+        project_id: { type: 'string', description: 'Optional. Google Cloud Project ID.' },
+        location: { type: 'string', description: 'Optional. Google Cloud Region.' },
+        engine_id: { type: 'string', description: 'ID of the app/engine. Required.' },
+        system_instruction: { type: 'string', description: 'Additional LLM system instructions.' },
+        use_default_system_instruction: { type: 'boolean', description: 'true clears the additional system instructions.' },
+        default_model_id: { type: 'string', description: 'Default model id for the assistant.' },
+        allowed_model_ids: { type: 'array', items: { type: 'string' }, description: 'Model ids users may select.' },
+        default_language: { type: 'string', description: 'Default response language code.' },
+        enable_web_grounding: { type: 'boolean', description: 'Allow web search results as answer sources.' },
+        web_grounding_type: { type: 'string', enum: ['GOOGLE_SEARCH', 'ENTERPRISE_WEB_SEARCH', 'DISABLED'], description: 'ENTERPRISE_WEB_SEARCH is data-residency compliant; GOOGLE_SEARCH is not.' },
+        default_web_search_state: { type: 'boolean', description: 'Whether web search is on by default for new queries.' },
+        enable_location_context: { type: 'boolean', description: 'Use the user location to improve answers.' },
+        enable_knowledge_catalog: { type: 'boolean', description: 'Enable Knowledge Catalog integration (Preview).' },
         banned_phrases: {
           type: 'array',
-          items: { type: 'string' },
-          description: 'List of banned phrase strings.'
+          items: {
+            anyOf: [
+              { type: 'string' },
+              { type: 'object', properties: { phrase: { type: 'string' }, match_type: { type: 'string', enum: ['SIMPLE_STRING_MATCH', 'WORD_BOUNDARY_STRING_MATCH'] }, ignore_diacritics: { type: 'boolean' } }, required: ['phrase'] }
+            ]
+          },
+          description: 'Replaces the banned phrase list.'
         },
-        chat_history_retention_days: {
-          type: 'number',
-          description: 'Number of days to retain chat history for each new session (e.g., 30, 60, 90).'
+        model_armor: {
+          type: 'object',
+          properties: {
+            user_prompt_template: { type: 'string' },
+            response_template: { type: 'string' },
+            failure_mode: { type: 'string', enum: ['FAIL_OPEN', 'FAIL_CLOSED'] }
+          },
+          description: 'Model Armor template resource names applied to prompts and responses.'
         },
-        enable_all_assistant_features: {
-          type: 'boolean',
-          description: 'Convenience flag to enable web grounding, default web search, and location context at once.'
-        },
-        disable_all_assistant_features: {
-          type: 'boolean',
-          description: 'Convenience flag to disable web grounding, default web search, and location context at once.'
-        }
+        sensitive_data_protection_policy: { type: 'string', description: 'Sensitive Data Protection policy resource name.' },
+        chat_history_retention_days: { type: 'number', description: 'Chat history retention for new sessions, in days (Engine.sessionConfig.sessionTtl).' },
+        enable_all_assistant_features: { type: 'boolean', description: 'Enable web grounding, default web search and location context.' },
+        disable_all_assistant_features: { type: 'boolean', description: 'Disable web grounding, default web search and location context.' }
       },
       required: ['action', 'engine_id']
     }
@@ -2145,165 +2119,69 @@ async function manageSearchUi(args: any): Promise<any> {
 
 async function manageAssistant(args: any): Promise<any> {
   const { projectId, location } = getGcpParams(args);
-  const parent = `projects/${projectId}/locations/${location}/collections/${config.collectionId}`;
   const engineId = args.engine_id;
-  const engineName = `${parent}/engines/${engineId}`;
+  if (!engineId) throw new Error('engine_id is required.');
   const action = args.action;
-
-  const baseUrl = `${discoveryEngineBaseUrl(location, 'v1alpha')}/${engineName}`;
   const headers = await getAuthHeaders(projectId);
+  const engineUrl = `${discoveryEngineBaseUrl(location, 'v1alpha')}/projects/${projectId}/locations/${location}/collections/${config.collectionId}/engines/${engineId}`;
+  const assistantUrl = `${engineUrl}/assistants/default_assistant`;
 
-  const resGet = await fetch(baseUrl, { headers });
-  const engine = await resGet.json();
-  const commonConfig = engine.commonConfig || {};
-  const companyStr = commonConfig.companyName || '';
-
-  let asstConfig: any = {
-    mode: 'Use default',
-    instruction: '',
-    enableWebGrounding: true,
-    webGroundingType: 'ENTERPRISE_WEB_SEARCH',
-    defaultWebSearchState: true,
-    enableLocationContext: true,
-    bannedPhrases: ['testbannedphrase'],
-    retentionDays: 60
-  };
-
-  if (companyStr.includes('|| ASST_CFG:')) {
-    try {
-      const parsed = JSON.parse(companyStr.split('|| ASST_CFG:')[1]);
-      asstConfig = { ...asstConfig, ...parsed };
-    } catch (e) {
-      // ignore JSON parse error and use default
-    }
-  }
+  const [engine, assistant] = await Promise.all([
+    fetchJson(engineUrl, { headers }, 'Get engine'),
+    fetchJson(assistantUrl, { headers }, 'Get assistant')
+  ]);
+  const legacy = parseLegacyCompanyName(engine.commonConfig?.companyName);
 
   if (action === 'get') {
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            status: 'SUCCESS',
-            engine_id: engineId,
-            assistant_options: {
-              additional_llm_system_instructions: {
-                mode: asstConfig.mode || 'Use default',
-                instruction: asstConfig.instruction || '',
-                description: 'Provide additional instructions for the LLM to follow. This could include style, formatting, tool use or anything that LLM needs to know more about your application.'
-              },
-              enable_web_grounding: {
-                enabled: asstConfig.enableWebGrounding !== false,
-                grounding_type: asstConfig.webGroundingType || 'ENTERPRISE_WEB_SEARCH',
-                description: 'Allow Gemini Enterprise to use web search results as answer sources. Enterprise web search (data residency compliant) or Google Search (not data residency compliant).'
-              },
-              default_web_search_state: {
-                enabled: asstConfig.defaultWebSearchState !== false,
-                description: 'Choose whether web search is turned on or off by default for new queries. Users can always change this setting for each search.'
-              },
-              enable_location_context: {
-                enabled: asstConfig.enableLocationContext !== false,
-                description: 'Allow the Gemini Enterprise app to use your location to improve the quality of responses.'
-              },
-              banned_phrases: {
-                count: (asstConfig.bannedPhrases || []).length,
-                phrases: asstConfig.bannedPhrases || ['testbannedphrase'],
-                description: "Configure banned phrases. If the query to the assistant or assistant response contains any of the banned phrases, the assistant's answer will be rejected."
-              },
-              chat_history_retention_period: {
-                days: asstConfig.retentionDays || 60,
-                description: 'The number of days to retain chat history for each new session.'
-              }
-            }
-          }, null, 2)
-        }
-      ]
-    };
+    return textResult({
+      status: 'SUCCESS',
+      engine_id: engineId,
+      assistant_options: describeAssistant(assistant, engine),
+      legacy_company_name_config_detected: legacy.config !== null
+    });
   }
 
-  if (action === 'update' || action === 'update_prompt_chips' || action === 'update_system_instruction') {
-    if (args.use_default_system_instruction === true) {
-      asstConfig.mode = 'Use default';
-      asstConfig.instruction = '';
-    } else if (args.system_instruction !== undefined) {
-      asstConfig.mode = 'Customize';
-      asstConfig.instruction = args.system_instruction;
+  if (action === 'update') {
+    if (args.prompt_chips !== undefined) {
+      throw new Error('prompt_chips is no longer supported: it was never persisted by the API.');
+    }
+    // Lossless migration: legacy values only fill gaps left by explicit arguments.
+    const effectiveArgs = legacy.config ? { ...legacyToArgs(legacy.config, args), ...args } : args;
+    const { assistant: patch, updateMask } = buildAssistantPatch(assistant, effectiveArgs);
+
+    let updatedAssistant = assistant;
+    if (updateMask.length > 0) {
+      updatedAssistant = await fetchJson(`${assistantUrl}?updateMask=${updateMask.join(',')}`, {
+        method: 'PATCH', headers, body: JSON.stringify(patch)
+      }, 'Update assistant');
     }
 
-    if (args.enable_all_assistant_features === true) {
-      asstConfig.enableWebGrounding = true;
-      asstConfig.webGroundingType = 'ENTERPRISE_WEB_SEARCH';
-      asstConfig.defaultWebSearchState = true;
-      asstConfig.enableLocationContext = true;
-    } else if (args.disable_all_assistant_features === true) {
-      asstConfig.enableWebGrounding = false;
-      asstConfig.defaultWebSearchState = false;
-      asstConfig.enableLocationContext = false;
-    } else {
-      if (args.enable_web_grounding !== undefined) {
-        asstConfig.enableWebGrounding = args.enable_web_grounding;
-      }
-      if (args.web_grounding_type !== undefined) {
-        asstConfig.webGroundingType = args.web_grounding_type;
-      }
-      if (args.default_web_search_state !== undefined) {
-        asstConfig.defaultWebSearchState = args.default_web_search_state;
-      }
-      if (args.enable_location_context !== undefined) {
-        asstConfig.enableLocationContext = args.enable_location_context;
-      }
-      if (args.banned_phrases !== undefined) {
-        asstConfig.bannedPhrases = args.banned_phrases;
-      }
-      if (args.chat_history_retention_days !== undefined) {
-        asstConfig.retentionDays = args.chat_history_retention_days;
-      }
+    let updatedEngine = engine;
+    const enginePatch: any = {};
+    const engineMask: string[] = [];
+    if (effectiveArgs.chat_history_retention_days !== undefined) {
+      const days = Number(effectiveArgs.chat_history_retention_days);
+      if (!Number.isInteger(days) || days < 1) throw new Error('chat_history_retention_days must be a positive integer.');
+      enginePatch.sessionConfig = { sessionTtl: { days } };
+      engineMask.push('sessionConfig.sessionTtl');
+    }
+    // Strip the legacy suffix only after the assistant update succeeded, so no setting is lost.
+    if (legacy.config !== null) {
+      enginePatch.commonConfig = { ...(engine.commonConfig || {}), companyName: legacy.prefix };
+      engineMask.push('commonConfig.companyName');
+    }
+    if (engineMask.length > 0) {
+      updatedEngine = await fetchJson(`${engineUrl}?updateMask=${engineMask.join(',')}`, {
+        method: 'PATCH', headers, body: JSON.stringify(enginePatch)
+      }, 'Update engine session/common config');
     }
 
-    const prefix = companyStr.split('|| ASST_CFG:')[0].trim() || 'My Organization';
-    commonConfig.companyName = `${prefix} || ASST_CFG:${JSON.stringify(asstConfig)}`;
-
-    const resPatch = await fetch(`${baseUrl}?updateMask=common_config`, {
-      method: 'PATCH',
-      headers,
-      body: JSON.stringify({ commonConfig })
+    return textResult({
+      status: 'SUCCESS',
+      message: `Assistant settings updated for app "${engineId}".`,
+      migrated_legacy_company_name_config: legacy.config !== null,
+      assistant_options: describeAssistant(updatedAssistant, updatedEngine)
     });
-    await resPatch.json();
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            status: 'SUCCESS',
-            message: `Assistant settings updated successfully for app "${engineId}".`,
-            assistant_options: {
-              additional_llm_system_instructions: {
-                mode: asstConfig.mode,
-                instruction: asstConfig.instruction
-              },
-              enable_web_grounding: {
-                enabled: asstConfig.enableWebGrounding,
-                grounding_type: asstConfig.webGroundingType
-              },
-              default_web_search_state: {
-                enabled: asstConfig.defaultWebSearchState
-              },
-              enable_location_context: {
-                enabled: asstConfig.enableLocationContext
-              },
-              banned_phrases: {
-                count: (asstConfig.bannedPhrases || []).length,
-                phrases: asstConfig.bannedPhrases
-              },
-              chat_history_retention_period: {
-                days: asstConfig.retentionDays
-              }
-            }
-          }, null, 2)
-        }
-      ]
-    };
   }
 
   throw new Error(`Unsupported action "${action}" for gemini_enterprise_manage_assistant.`);
