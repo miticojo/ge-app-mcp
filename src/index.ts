@@ -14,6 +14,7 @@ import { config } from './config.js';
 import { searchTools, handleSearchToolCall } from './tools/search.js';
 import { adminTools, handleAdminToolCall } from './tools/admin.js';
 import { billingTools, handleBillingToolCall } from './tools/billing.js';
+import { withAnnotations } from './annotations.js';
 
 // Initialize the MCP server
 const server = new Server(
@@ -31,13 +32,13 @@ const server = new Server(
 // Merge tool definitions dynamically based on allowed scopes
 const allTools: any[] = [];
 if (config.scopes.includes('search')) {
-  allTools.push(...searchTools);
+  allTools.push(...withAnnotations(searchTools));
 }
 if (config.scopes.includes('admin')) {
-  allTools.push(...adminTools);
+  allTools.push(...withAnnotations(adminTools));
 }
 if (config.scopes.includes('billing')) {
-  allTools.push(...billingTools);
+  allTools.push(...withAnnotations(billingTools));
 }
 
 // Register list tools handler
@@ -69,7 +70,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     
     // Route to admin tools
-    if (name.startsWith('gemini_enterprise_manage_') || name.startsWith('gemini_enterprise_configure_')) {
+    if (name.startsWith('gemini_enterprise_manage_') || name.startsWith('gemini_enterprise_configure_') || name === 'gemini_enterprise_get_operation') {
       return await handleAdminToolCall(name, args);
     }
 

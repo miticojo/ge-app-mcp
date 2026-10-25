@@ -100,6 +100,11 @@ const EXPECTED_GCP_MAPPINGS = {
     proto: 'google.cloud.discoveryengine.v1.Engine',
     requiredArgs: ['action', 'engine_id']
   },
+  gemini_enterprise_get_operation: {
+    client: null, // REST: google.longrunning.Operations
+    proto: 'google.longrunning.Operation',
+    requiredArgs: ['operation_name']
+  },
   gemini_enterprise_manage_knowledge_graph: {
     client: 'EngineServiceClient',
     proto: 'google.cloud.discoveryengine.v1.Engine',

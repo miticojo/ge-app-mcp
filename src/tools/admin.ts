@@ -609,6 +609,18 @@ export const adminTools: any[] = [
       },
       required: ['action', 'engine_id']
     }
+  },
+  {
+    name: 'gemini_enterprise_get_operation',
+    description: 'Get the status of a long-running operation returned by another tool (Discovery Engine or Vertex AI Skill Registry).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        operation_name: { type: 'string', description: 'Full operation resource name, e.g. projects/p/locations/global/collections/c/engines/e/operations/123.' },
+        project_id: { type: 'string', description: 'Optional. Google Cloud Project ID used for quota attribution.' }
+      },
+      required: ['operation_name']
+    }
   }
 ];
 
@@ -627,6 +639,35 @@ function getGcpParams(args: any) {
 
 function textResult(payload: unknown) {
   return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
+}
+
+const LRO_TIMEOUT = Symbol('lro-timeout');
+
+/**
+ * Waits for a GAPIC long-running operation for at most config.lroWaitSeconds. Remote MCP clients
+ * (e.g. Gemini Enterprise) time out on long tool calls, so slow operations are returned as pending
+ * and can be polled with gemini_enterprise_get_operation.
+ */
+async function settleGapicOperation(operation: any): Promise<{ done: true; result: any[] } | { done: false; operation: string }> {
+  const completion = operation.promise();
+  completion.catch(() => undefined); // avoid an unhandled rejection if we stop waiting
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise(resolve => {
+    timer = setTimeout(() => resolve(LRO_TIMEOUT), config.lroWaitSeconds * 1000);
+    timer.unref();
+  });
+  const outcome = await Promise.race([completion, timeout]);
+  clearTimeout(timer);
+  if (outcome === LRO_TIMEOUT) return { done: false, operation: operation.name };
+  return { done: true, result: outcome as any[] };
+}
+
+function pendingOperationResult(operationName: string) {
+  return textResult({
+    status: 'RUNNING',
+    message: 'The operation is still running. Poll it with gemini_enterprise_get_operation.',
+    operation_name: operationName
+  });
 }
 
 // Handler routing tool calls to appropriate actions
@@ -662,6 +703,8 @@ export async function handleAdminToolCall(name: string, args: any): Promise<any>
       return await manageObservability(args);
     case 'gemini_enterprise_manage_knowledge_graph':
       return await manageKnowledgeGraph(args);
+    case 'gemini_enterprise_get_operation':
+      return await getOperation(args);
     default:
       throw new Error(`Unknown admin tool: ${name}`);
   }
@@ -768,23 +811,13 @@ async function manageApps(args: any): Promise<any> {
     let operation = await res.json();
     const lroName = operation.name;
     
-    // Poll the Long Running Operation with timeout guard (max 5 minutes)
-    const startTime = Date.now();
-    const MAX_POLL_MS = 5 * 60 * 1000;
-    while (!operation.done) {
-      if (Date.now() - startTime > MAX_POLL_MS) {
-        throw new Error(`Timeout waiting for engine creation LRO "${lroName}" to complete.`);
-      }
+    // Bounded wait: long creations return the operation name for gemini_enterprise_get_operation.
+    const deadline = Date.now() + config.lroWaitSeconds * 1000;
+    while (!operation.done && Date.now() < deadline) {
       await new Promise(r => setTimeout(r, 3000));
-      const opRes = await fetch(`https://${host}/v1alpha/${lroName}`, {
-        headers
-      });
-      if (!opRes.ok) {
-        const opErrText = await opRes.text();
-        throw new Error(`Failed to poll LRO "${lroName}": ${opRes.status} ${opRes.statusText}. Details: ${opErrText}`);
-      }
-      operation = await opRes.json();
+      operation = await fetchJson(`https://${host}/v1alpha/${lroName}`, { headers }, `Poll operation ${lroName}`);
     }
+    if (!operation.done) return pendingOperationResult(lroName);
 
     if (operation.error) {
       throw new Error(`Engine creation failed: ${JSON.stringify(operation.error)}`);
@@ -812,7 +845,8 @@ async function manageApps(args: any): Promise<any> {
 
   if (action === 'delete') {
     const [operation] = await client.deleteEngine({ name: engineName });
-    await operation.promise();
+    const settled = await settleGapicOperation(operation);
+    if (!settled.done) return pendingOperationResult(settled.operation);
     return {
       content: [
         {
@@ -971,7 +1005,11 @@ async function manageDataStores(args: any): Promise<any> {
       }
     });
 
-    const [createdDataStore] = await operation.promise();
+    const settled = await settleGapicOperation(operation);
+
+    if (!settled.done) return pendingOperationResult(settled.operation);
+
+    const [createdDataStore] = settled.result;
     return {
       content: [
         {
@@ -992,7 +1030,8 @@ async function manageDataStores(args: any): Promise<any> {
 
   if (action === 'delete') {
     const [operation] = await client.deleteDataStore({ name: dataStoreName });
-    await operation.promise();
+    const settled = await settleGapicOperation(operation);
+    if (!settled.done) return pendingOperationResult(settled.operation);
     return {
       content: [
         {
@@ -1117,7 +1156,11 @@ async function manageTargetSites(args: any): Promise<any> {
       }
     });
 
-    const [createdSite] = await operation.promise();
+    const settled = await settleGapicOperation(operation);
+
+    if (!settled.done) return pendingOperationResult(settled.operation);
+
+    const [createdSite] = settled.result;
     return {
       content: [
         {
@@ -1146,7 +1189,8 @@ async function manageTargetSites(args: any): Promise<any> {
     }
 
     const [operation] = await client.deleteTargetSite({ name: matchedSite.name });
-    await operation.promise();
+    const settled = await settleGapicOperation(operation);
+    if (!settled.done) return pendingOperationResult(settled.operation);
 
     return {
       content: [
@@ -1208,7 +1252,9 @@ async function manageDocuments(args: any): Promise<any> {
     }
 
     const [operation] = await client.importDocuments(importRequest);
-    const [response] = await operation.promise();
+    const settled = await settleGapicOperation(operation);
+    if (!settled.done) return pendingOperationResult(settled.operation);
+    const [response] = settled.result;
 
     return {
       content: [
@@ -1230,7 +1276,9 @@ async function manageDocuments(args: any): Promise<any> {
       filter: '*',
       force: true
     });
-    const [response] = await operation.promise();
+    const settled = await settleGapicOperation(operation);
+    if (!settled.done) return pendingOperationResult(settled.operation);
+    const [response] = settled.result;
 
     return {
       content: [
@@ -1314,7 +1362,11 @@ async function manageSchema(args: any): Promise<any> {
       }
     });
 
-    const [createdSchema] = await operation.promise();
+    const settled = await settleGapicOperation(operation);
+
+    if (!settled.done) return pendingOperationResult(settled.operation);
+
+    const [createdSchema] = settled.result;
     return {
       content: [
         {
@@ -1340,7 +1392,11 @@ async function manageSchema(args: any): Promise<any> {
       }
     });
 
-    const [updatedSchema] = await operation.promise();
+    const settled = await settleGapicOperation(operation);
+
+    if (!settled.done) return pendingOperationResult(settled.operation);
+
+    const [updatedSchema] = settled.result;
     return {
       content: [
         {
@@ -2422,3 +2478,25 @@ async function manageKnowledgeGraph(args: any): Promise<any> {
   throw new Error(`Unsupported action "${action}" for gemini_enterprise_manage_knowledge_graph.`);
 }
 
+// 15. Long-running operation status
+const OPERATION_NAME = /^projects\/[^/]+\/locations\/([^/]+)\/(?:[^/]+\/[^/]+\/)*operations\/[^/]+$/;
+
+async function getOperation(args: any): Promise<any> {
+  const name = String(args.operation_name || '');
+  const match = OPERATION_NAME.exec(name);
+  if (!match || name.includes('..')) throw new Error('operation_name must be a full operation resource name (projects/.../locations/.../operations/...).');
+  const location = match[1];
+  const projectId = args.project_id || config.projectId || name.split('/')[1];
+  const headers = await getAuthHeaders(projectId);
+  const url = name.includes('/skills/')
+    ? `https://${location}-aiplatform.googleapis.com/v1beta1/${name}`
+    : `${discoveryEngineBaseUrl(location, 'v1alpha')}/${name}`;
+  const operation = await fetchJson(url, { headers }, 'Get operation');
+  return textResult({
+    status: operation.done ? (operation.error ? 'FAILED' : 'DONE') : 'RUNNING',
+    operation_name: name,
+    error: operation.error,
+    response: operation.response,
+    metadata: operation.metadata
+  });
+}
