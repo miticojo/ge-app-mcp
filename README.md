@@ -278,7 +278,9 @@ For detailed, copy-paste configurations to integrate this server into your prefe
 
 It provides comprehensive configurations for:
 *   **Cursor / Windsurf / Claude Desktop** (Direct stdio setup using `npx ge-app-mcp`).
-*   **Google Agent Development Kit (ADK)** (Native orchestration with `MCPToolset`).
+*   **Google Agent Development Kit (ADK)** (Native orchestration with `MCPToolset`). A runnable, tested agent that
+    also loads the skills and gates every change behind human confirmation lives in
+    [`examples/adk-admin-agent`](examples/adk-admin-agent/README.md).
 *   **LangChain & LangGraph** (Python & TypeScript integrations).
 *   **CrewAI**.
 
@@ -304,6 +306,8 @@ ge-app-mcp/
 │       ├── search.ts          # Search tool implementations (Data Plane)
 │       ├── admin.ts           # Admin tool implementations (Control Plane)
 │       └── billing.ts         # Billing & license management tools (Control Plane)
+├── examples/
+│   └── adk-admin-agent/       # ADK (Python) agent using the MCP tools and skills (stdio or HTTP)
 └── skills/                    # Agent Skills templates conforming to Vercel Agent Skills standard
     ├── admin-assistant/
     │   └── SKILL.md           # Skill for DevOps and infrastructure orchestration

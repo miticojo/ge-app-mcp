@@ -24,3 +24,6 @@ package-lock.json
 Dockerfile
 .dockerignore
 docs/
+
+# Examples are documentation, not part of the published server
+examples/
