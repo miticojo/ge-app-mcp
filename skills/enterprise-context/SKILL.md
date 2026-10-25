@@ -1,22 +1,35 @@
 ---
 name: enterprise-context
-description: This skill instructs the agent never to make assumptions or hallucinate answers regarding proprietary corporate systems, internal architectures, or internal codebase patterns.
+description: Ground answers about internal company knowledge in Gemini Enterprise data instead of guessing. Use when the user asks about corporate policies, internal guidelines, benefits, proprietary systems and APIs, customers, contracts, or past support tickets, or asks to "search", "find" or "check" internal documents.
+license: Apache-2.0
+metadata:
+  version: "0.4.0"
 ---
 
 # Enterprise Context Retriever
 
-## System Prompt / Behavioral Instructions for the Agent
-If the user asks questions related to:
--   Corporate policies, internal guidelines, or employee benefits.
--   Proprietary microservices architectures or internal APIs.
--   Information about clients, contracts, or historical support tickets.
+Never guess about proprietary systems, policies or customers. Retrieve, then answer with sources.
 
-**YOU MUST ADHERE TO THE FOLLOWING RULES:**
-1.  **Zero Trust & No Guessing**: Do not guess answers. If you do not have the information in your context, perform an immediate search.
-2.  **Systematic Search Use**: Call the `gemini_enterprise_search` tool passing the configured `datastore_id` for the target corporate knowledge base.
-3.  **Always Cite Sources**: When returning answers to the user, clearly list the source documents, their titles, and URLs returned by the search tool.
-4.  **Deep Dive with Get Document**: If the search returns only a brief snippet and you need to examine an entire configuration file or an extended source document, call `gemini_enterprise_get_document` to read its full content.
+## Rules
+1. **Search before answering** when the information is not already in your context.
+2. **Choose the scope**:
+   - `engine_id` (an app) searches every source connected to it (Drive, SharePoint, Jira, connectors...).
+     Prefer it for open questions.
+   - `datastore_id` targets one source. Prefer it when the user names a source or you need precision.
+3. **Pick the tool**:
+   - `gemini_enterprise_ask` for a direct question: returns a grounded answer, references and a
+     grounding score. For follow-ups, pass `session: "new"` the first time and then the returned
+     session name.
+   - `gemini_enterprise_search` to explore or list documents. Narrow with `filter`
+     (e.g. `category: ANY("policy")`), `order_by`, `relevance_threshold`; page with `page_token`.
+     For plain retrieval on a single data store, `search_addon_spec` can turn off generative add-ons
+     to reduce cost.
+4. **Read the full document** with `gemini_enterprise_get_document` when a snippet is not enough.
+5. **Cite sources**: list title and link of every document you used. If the grounding score is low or
+   nothing relevant is found, say so instead of filling gaps.
+6. **Respect access**: results reflect what the current user may see. Do not try other scopes or
+   identities to get around missing results.
 
-### Prerequisites & Security Scopes
-*   **Required Scope**: This skill relies entirely on the `search` scope to perform semantic and document search queries.
-*   **Enforcement**: Verify that the MCP server has the `search` scope enabled. If any search tool returns an "Access Denied" error, request the user to add the `search` scope to the `MCP_SCOPES` environment variable.
+## Scope
+These tools need the `search` scope. If a tool returns "Access Denied", ask the operator to add
+`search` to `MCP_SCOPES`.
