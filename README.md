@@ -14,6 +14,13 @@ This open-source project (released under the Apache 2.0 license) implements a **
 
 The server handles both **Data Plane** operations (semantic search, conversational RAG with the Answer API, document retrieval) and **Control Plane** operations (automated datastore creation, JSON schema management, ranking/Serving Configs tuning, and SaaS connector configurations).
 
+> [!TIP]
+> **Search only?** Google Cloud offers a managed remote MCP server for Agent Search at
+> `https://discoveryengine.googleapis.com/mcp` (`search`, `conversational_search`, `list_engines`; see the
+> [official reference](https://docs.cloud.google.com/generative-ai-app-builder/docs/reference/mcp)). Prefer it for
+> search. This server focuses on administration (apps, data stores, connectors, features, models, assistant, agents,
+> IAM, licenses), which the managed server does not expose as of 2026-10-25. Both can be used side by side.
+
 ---
 
 ## 🚀 Key Features & API Coverage
