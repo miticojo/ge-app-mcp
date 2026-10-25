@@ -835,13 +835,50 @@ async function manageApps(args: any): Promise<any> {
       };
     }
 
-    const [operation] = await client.createEngine({
-      parent,
-      engineId,
-      engine: enginePayload
+    const headers = await getAuthHeaders(projectId);
+    
+    // For specific GCP region routing, ensure host matches location
+    const host = location && location !== 'global' ? `${location}-discoveryengine.googleapis.com` : 'discoveryengine.googleapis.com';
+    const restBaseUrl = `https://${host}/v1alpha/${parent}/engines?engineId=${engineId}`;
+
+    const res = await fetch(restBaseUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(enginePayload)
     });
 
-    const [createdEngine] = await operation.promise();
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`Failed to create engine via REST: ${res.status} ${res.statusText}. Details: ${errText}`);
+    }
+
+    let operation = await res.json();
+    const lroName = operation.name;
+    
+    // Poll the Long Running Operation with timeout guard (max 5 minutes)
+    const startTime = Date.now();
+    const MAX_POLL_MS = 5 * 60 * 1000;
+    while (!operation.done) {
+      if (Date.now() - startTime > MAX_POLL_MS) {
+        throw new Error(`Timeout waiting for engine creation LRO "${lroName}" to complete.`);
+      }
+      await new Promise(r => setTimeout(r, 3000));
+      const opRes = await fetch(`https://${host}/v1alpha/${lroName}`, {
+        headers
+      });
+      if (!opRes.ok) {
+        const opErrText = await opRes.text();
+        throw new Error(`Failed to poll LRO "${lroName}": ${opRes.status} ${opRes.statusText}. Details: ${opErrText}`);
+      }
+      operation = await opRes.json();
+    }
+
+    if (operation.error) {
+      throw new Error(`Engine creation failed: ${JSON.stringify(operation.error)}`);
+    }
+
+    const finalEngine = operation.response || {};
+    
     return {
       content: [
         {
@@ -850,9 +887,9 @@ async function manageApps(args: any): Promise<any> {
             status: 'SUCCESS',
             message: `App "${engineId}" created successfully.`,
             app: {
-              name: createdEngine.name,
-              displayName: createdEngine.displayName,
-              solutionType: createdEngine.solutionType
+              name: finalEngine.name,
+              displayName: finalEngine.displayName,
+              solutionType: finalEngine.solutionType
             }
           }, null, 2)
         }

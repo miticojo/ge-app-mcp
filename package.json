@@ -16,7 +16,7 @@
     "test:configurations": "node tests/test_feature_management_consolidated.mjs && node tests/test_knowledge_graph.mjs && node tests/test_assistant_suite.mjs"
   },
   "overrides": {
-    "brace-expansion": "5.0.9",
+    "brace-expansion": "5.0.12",
     "gcp-metadata": "8.1.4",
     "gaxios": "7.1.5",
     "rimraf": "6.1.3",
