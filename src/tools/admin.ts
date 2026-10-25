@@ -247,8 +247,8 @@ export const adminTools: any[] = [
       properties: {
         action: {
           type: 'string',
-          enum: ['create', 'list', 'delete', 'update'],
-          description: 'The administrative agent action to perform: create, list, delete, or update.'
+          enum: ['create', 'list', 'get', 'delete', 'update'],
+          description: 'The administrative agent action to perform: create, list, get, delete, or update.'
         },
         engine_id: {
           type: 'string',
@@ -268,16 +268,30 @@ export const adminTools: any[] = [
         },
         agent_type: {
           type: 'string',
-          enum: ['a2a', 'low-code'],
-          description: 'Optional. The type of agent to manage: "a2a" for Agent-to-Agent or "low-code" for native employee-made designer playbooks. Defaults to "a2a".'
+          enum: ['a2a', 'low-code', 'adk'],
+          description: 'Optional. "a2a" (external Agent-to-Agent endpoint), "low-code" (Agent Designer playbooks) or "adk" (agent deployed on Vertex AI Agent Engine). Defaults to "a2a".'
         },
         endpoint_url: {
           type: 'string',
-          description: 'The HTTPS URL endpoint where the custom A2A agent logic is hosted. Only used if agent_type is "a2a".'
+          description: 'The HTTPS URL endpoint where the custom A2A agent logic is hosted. Required for agent_type "a2a".'
+        },
+        reasoning_engine: {
+          type: 'string',
+          description: 'For agent_type "adk": projects/{project}/locations/{location}/reasoningEngines/{id}.'
+        },
+        sharing_scope: {
+          type: 'string',
+          enum: ['PRIVATE', 'RESTRICTED', 'ALL_USERS'],
+          description: 'Optional. Agent sharing scope. Sharing with specific principals and ownership transfer are Console-only.'
+        },
+        starter_prompts: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional. Starter prompt suggestions shown on the agent landing page.'
         },
         model: {
           type: 'string',
-          description: 'The LLM model used by low-code agents (e.g., "gemini-3.5-flash", "gemini-1.5-pro").'
+          description: 'The LLM model used by low-code agents (e.g., "gemini-3.5-flash").'
         },
         instruction: {
           type: 'string',
@@ -1523,6 +1537,28 @@ async function manageControls(args: any): Promise<any> {
 }
 
 // 8. Native Agent Management
+const REASONING_ENGINE = /^projects\/[^/]+\/locations\/[^/]+\/reasoningEngines\/[^/]+$/;
+
+function validateReasoningEngine(value: unknown): string {
+  if (typeof value !== 'string' || !REASONING_ENGINE.test(value)) {
+    throw new Error('reasoning_engine must be projects/{project}/locations/{location}/reasoningEngines/{id}.');
+  }
+  return value;
+}
+
+function agentGovernanceFields(sharingScope: unknown, starterPrompts: unknown): any {
+  const fields: any = {};
+  if (sharingScope !== undefined) {
+    if (!['PRIVATE', 'RESTRICTED', 'ALL_USERS'].includes(String(sharingScope))) throw new Error('sharing_scope must be PRIVATE, RESTRICTED or ALL_USERS.');
+    fields.sharingConfig = { scope: sharingScope };
+  }
+  if (starterPrompts !== undefined) {
+    if (!Array.isArray(starterPrompts)) throw new Error('starter_prompts must be an array of strings.');
+    fields.starterPrompts = starterPrompts.map(text => ({ text: String(text) }));
+  }
+  return fields;
+}
+
 async function manageAgents(args: any): Promise<any> {
   const projectId = args.project_id || config.projectId;
   const location = args.location || config.location;
@@ -1538,7 +1574,10 @@ async function manageAgents(args: any): Promise<any> {
     instruction, 
     datastores, 
     tools,
-    subagents
+    subagents,
+    reasoning_engine,
+    sharing_scope,
+    starter_prompts
   } = args;
 
   if (!projectId) {
@@ -1575,6 +1614,13 @@ async function manageAgents(args: any): Promise<any> {
       };
     }
 
+    case 'get': {
+      if (!agent_id) throw new Error('agent_id is required for get action.');
+      const headers = await getAuthHeaders(projectId);
+      const agent = await fetchJson(`${baseUrl}/${encodeURIComponent(agent_id)}`, { headers }, 'Get agent');
+      return textResult({ status: 'SUCCESS', agent });
+    }
+
     case 'create': {
       if (!agent_id) throw new Error('agent_id is required for create action.');
       const headers = await getAuthHeaders(projectId);
@@ -1589,7 +1635,7 @@ async function manageAgents(args: any): Promise<any> {
         console.error(`[Admin] Creating native Low-Code agent "${agent_id}" for engine "${engine_id}" in Project "${projectId}"`);
         
         const dataStoreSpecs = (datastores || []).map((dsId: string) => ({
-          dataStore: `projects/${projectId}/locations/${location}/collections/default_collection/dataStores/${dsId}`
+          dataStore: `projects/${projectId}/locations/${location}/collections/${config.collectionId}/dataStores/${dsId}`
         }));
 
         const toolSpecs = (tools || []).map((toolName: string) => ({
@@ -1617,7 +1663,7 @@ async function manageAgents(args: any): Promise<any> {
           rootNode.llmAgentNode.subAgentIds = subagents.map((sa: any) => sa.agent_id);
           for (const sa of subagents) {
             const saDataStoreSpecs = (sa.datastores || []).map((dsId: string) => ({
-              dataStore: `projects/${projectId}/locations/${location}/collections/default_collection/dataStores/${dsId}`
+              dataStore: `projects/${projectId}/locations/${location}/collections/${config.collectionId}/dataStores/${dsId}`
             }));
             const saToolSpecs = (sa.tools || []).map((tName: string) => ({
               name: tName
@@ -1651,9 +1697,18 @@ async function manageAgents(args: any): Promise<any> {
             nodes
           }
         };
+      } else if (agent_type === 'adk') {
+        payload = {
+          displayName: name,
+          description: desc,
+          adkAgentDefinition: { provisionedReasoningEngine: { reasoningEngine: validateReasoningEngine(reasoning_engine) } }
+        };
       } else {
         console.error(`[Admin] Creating custom A2A agent "${agent_id}" for engine "${engine_id}" in Project "${projectId}"`);
-        const endpoint = endpoint_url || `https://example.com/agents/${agent_id}`;
+        if (!endpoint_url || !/^https:\/\//.test(endpoint_url)) {
+          throw new Error('endpoint_url (https) is required for A2A agents.');
+        }
+        const endpoint = endpoint_url;
 
         const agentCard = {
           protocolVersion: 'a2a.v1',
@@ -1677,6 +1732,8 @@ async function manageAgents(args: any): Promise<any> {
           }
         };
       }
+
+      Object.assign(payload, agentGovernanceFields(sharing_scope, starter_prompts));
 
       const res = await fetch(url, {
         method: 'POST',
@@ -1751,7 +1808,7 @@ async function manageAgents(args: any): Promise<any> {
         url += ',lowCodeAgentDefinition';
 
         const dataStoreSpecs = (datastores || []).map((dsId: string) => ({
-          dataStore: `projects/${projectId}/locations/${location}/collections/default_collection/dataStores/${dsId}`
+          dataStore: `projects/${projectId}/locations/${location}/collections/${config.collectionId}/dataStores/${dsId}`
         }));
 
         const toolSpecs = (tools || []).map((toolName: string) => ({
@@ -1779,7 +1836,7 @@ async function manageAgents(args: any): Promise<any> {
           rootNode.llmAgentNode.subAgentIds = subagents.map((sa: any) => sa.agent_id);
           for (const sa of subagents) {
             const saDataStoreSpecs = (sa.datastores || []).map((dsId: string) => ({
-              dataStore: `projects/${projectId}/locations/${location}/collections/default_collection/dataStores/${dsId}`
+              dataStore: `projects/${projectId}/locations/${location}/collections/${config.collectionId}/dataStores/${dsId}`
             }));
             const saToolSpecs = (sa.tools || []).map((tName: string) => ({
               name: tName
@@ -1809,9 +1866,16 @@ async function manageAgents(args: any): Promise<any> {
           rootAgentId: 'root_agent',
           nodes
         };
+      } else if (agent_type === 'adk' && reasoning_engine !== undefined) {
+        url += ',adkAgentDefinition';
+        payload.adkAgentDefinition = { provisionedReasoningEngine: { reasoningEngine: validateReasoningEngine(reasoning_engine) } };
       } else {
         console.error(`[Admin] Updating native agent "${agent_id}" for engine "${engine_id}" in Project "${projectId}"`);
       }
+      const governance = agentGovernanceFields(sharing_scope, starter_prompts);
+      if (governance.sharingConfig) url += ',sharingConfig';
+      if (governance.starterPrompts) url += ',starterPrompts';
+      Object.assign(payload, governance);
 
       const res = await fetch(url, {
         method: 'PATCH',
