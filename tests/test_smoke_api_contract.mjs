@@ -109,6 +109,16 @@ const EXPECTED_GCP_MAPPINGS = {
     client: 'EngineServiceClient',
     proto: 'google.cloud.discoveryengine.v1.Engine',
     requiredArgs: ['action', 'engine_id']
+  },
+  gemini_enterprise_inspect: {
+    client: 'EngineServiceClient',
+    proto: 'google.cloud.discoveryengine.v1.Engine',
+    requiredArgs: ['target']
+  },
+  gemini_enterprise_inspect_licenses: {
+    client: 'UserLicenseServiceClient',
+    proto: 'google.cloud.discoveryengine.v1.UserLicense',
+    requiredArgs: ['action']
   }
 };
 

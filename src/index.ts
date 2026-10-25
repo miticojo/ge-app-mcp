@@ -36,11 +36,14 @@ if (config.scopes.includes('billing')) {
 
 // Audit trail without arguments (they can contain policies or personal data) and without tokens.
 function auditToolCall(name: string, args: any, outcome: 'ok' | 'error') {
+  const action = typeof args?.action === 'string'
+    ? args.action
+    : (typeof args?.target === 'string' ? args.target : undefined);
   console.error(JSON.stringify({
     severity: outcome === 'ok' ? 'INFO' : 'WARNING',
     message: 'tool_call',
     tool: name,
-    action: typeof args?.action === 'string' ? args.action : undefined,
+    action,
     principal: currentUserCredentials()?.principal ?? (config.transport === 'stdio' ? 'local-adc' : undefined),
     outcome
   }));
@@ -59,12 +62,12 @@ async function routeToolCall(name: string, args: any) {
   }
 
   // Route to billing/licensing tools
-  if (name.startsWith('gemini_enterprise_manage_licenses')) {
+  if (name === 'gemini_enterprise_manage_licenses' || name === 'gemini_enterprise_inspect_licenses') {
     return await handleBillingToolCall(name, args);
   }
 
   // Route to admin tools
-  if (name.startsWith('gemini_enterprise_manage_') || name.startsWith('gemini_enterprise_configure_') || name === 'gemini_enterprise_get_operation') {
+  if (name.startsWith('gemini_enterprise_manage_') || name.startsWith('gemini_enterprise_configure_') || name === 'gemini_enterprise_get_operation' || name === 'gemini_enterprise_inspect') {
     return await handleAdminToolCall(name, args);
   }
 

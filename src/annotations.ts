@@ -24,6 +24,8 @@ export const TOOL_ANNOTATIONS: Record<string, ToolAnnotations> = {
   gemini_enterprise_ask: read('Ask enterprise data (grounded answer)'),
   gemini_enterprise_get_document: read('Get document'),
   gemini_enterprise_get_operation: read('Get long-running operation status'),
+  gemini_enterprise_inspect: read('Inspect Gemini Enterprise resources'),
+  gemini_enterprise_inspect_licenses: read('Inspect licenses and seat usage'),
   gemini_enterprise_manage_apps: destructive('Manage apps and app IAM'),
   gemini_enterprise_manage_datastore: destructive('Manage data stores and data store IAM'),
   gemini_enterprise_configure_connector: destructive('Manage data connectors'),

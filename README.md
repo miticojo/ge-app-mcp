@@ -26,6 +26,7 @@ The server provides complete (100% operational coverage) mapping to the core gRP
 *   **Document Retrieval (`gemini_enterprise_get_document`)**: Full content and metadata of an indexed document.
 
 ### ⚙️ Control Plane (Administration & Tuning)
+*   **Read-only inspection (`gemini_enterprise_inspect`, `gemini_enterprise_inspect_licenses`)**: Dedicated `readOnlyHint: true` tools covering every control-plane resource and license pool/usage check so audits and pre-change checks run in parallel with zero confirmation prompts inside Gemini Enterprise.
 *   **Apps (`gemini_enterprise_manage_apps`)**: CRUD and IAM for apps (engines).
 *   **Data stores (`gemini_enterprise_manage_datastore`)**: CRUD, resource-level IAM on data stores and connector collections, and project-level data store access control.
 *   **Connectors (`gemini_enterprise_configure_connector`)**: Real DataConnector API: get, setup, connector runs, and `citation_mappings` for custom MCP data stores.
@@ -219,8 +220,8 @@ Then open *Actions → Reload custom actions*, select all discovered actions, cl
 data store to the app used by your administrators (*Connected data stores → Add existing data stores*). On first use
 in the Gemini Enterprise web app, each administrator opens *Sources / Connectors* in the chat bar and clicks
 **Authorize** next to the connector to complete per-user OAuth consent. Read-only tools (`search`, `ask`,
-`get_document`, `get_operation`) run without a confirmation prompt; every other action shows a `Review` card
-(**Send** / **Cancel**) and runs sequentially.
+`get_document`, `get_operation`, `inspect`, `inspect_licenses`) run in parallel without a confirmation prompt;
+mutating actions (`manage_*`, `configure_connector`) show a `Review` card (**Send** / **Cancel**) and run sequentially.
 
 **5. Grant roles to administrators**: their usual Discovery Engine roles plus
 `roles/serviceusage.serviceUsageConsumer` on the project (the server sends `x-goog-user-project`).

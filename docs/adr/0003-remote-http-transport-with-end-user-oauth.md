@@ -23,8 +23,10 @@ The server must stay usable from local harnesses over stdio.
 - The recommended OAuth scope is `discoveryengine.readwrite` (accepted by every discoveryengine
   v1alpha method) instead of `cloud-platform`. `gemini_enterprise_manage_skills` (Vertex AI) needs
   `cloud-platform` and is therefore not exposed in the Gemini Enterprise deployment.
-- Tools carry MCP annotations; only pure reads are `readOnlyHint` (no confirmation prompt in Gemini
-  Enterprise).
+- Tools carry MCP annotations; pure reads (`search`, `ask`, `get_document`, `get_operation`,
+  `inspect`, `inspect_licenses`) are `readOnlyHint: true` so Gemini Enterprise runs them in parallel
+  without confirmation prompts, while mutating tools (`manage_*`, `configure_connector`) remain
+  `readOnlyHint: false` so every change prompts for review.
 
 ## Consequences
 - **Deviation from MCP security guidance**: forwarding the user token to Google APIs is token

@@ -1,8 +1,28 @@
 import { config } from '../config.js';
 import { getAuthHeaders, fetchJson } from '../gcp.js';
 import { selectLicenseConfigId, summarizeSubscriptions, validateEmails } from '../domain/licensing.js';
+import { buildLicenseInspectCall } from '../domain/inspect.js';
 
 export const billingTools = [
+  {
+    name: 'gemini_enterprise_inspect_licenses',
+    description: 'Read-only inspection of Gemini Enterprise license pools, assigned seats, indexed structured data, and active seat usage stats. Safe for parallel calls without confirmation prompts.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['list', 'usage_stats'],
+          description: 'list (pools, total/assigned seats, assigned users, indexed bytes) or usage_stats (used seats per pool).'
+        },
+        project_id: {
+          type: 'string',
+          description: 'Optional. Google Cloud Project ID.'
+        }
+      },
+      required: ['action']
+    }
+  },
   {
     name: 'gemini_enterprise_manage_licenses',
     description: 'Manage Gemini Enterprise license pools and user seat assignments: list, usage_stats, assign, unassign.',
@@ -64,6 +84,9 @@ function formatBytes(bytes: number): string {
 const textResult = (payload: unknown) => ({ content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] });
 
 export async function handleBillingToolCall(name: string, args: any): Promise<any> {
+  if (name === 'gemini_enterprise_inspect_licenses') {
+    return await handleBillingToolCall('gemini_enterprise_manage_licenses', buildLicenseInspectCall(args));
+  }
   if (name !== 'gemini_enterprise_manage_licenses') {
     throw new Error(`Unsupported billing tool name: ${name}`);
   }

@@ -14,13 +14,17 @@ you (local credentials, or their own OAuth token when this server runs inside Ge
 retrying. `USER_PROJECT_DENIED` means they also need `roles/serviceusage.serviceUsageConsumer`.
 
 ## 1. Always inspect before you change
-- Read the current state first (`get`, `list`, `get-iam`) and summarize it.
-- Call `gemini_enterprise_manage_*` and `gemini_enterprise_configure_connector` tools **one at a time
-  (sequentially)** when running inside Gemini Enterprise: tools that require user confirmation cannot run
-  in parallel.
+- **Always use `gemini_enterprise_inspect` and `gemini_enterprise_inspect_licenses` for every read,
+  audit, or pre-change check** — never call `gemini_enterprise_manage_*` or
+  `gemini_enterprise_configure_connector` just to read (`get`, `list`, `get-iam`, `list_runs`,
+  `usage_stats`). Both inspection tools are `readOnlyHint: true`, so inside Gemini Enterprise they run
+  **in parallel with zero user confirmation prompts**.
+- Reserve `gemini_enterprise_manage_*` and `gemini_enterprise_configure_connector` strictly for actual
+  changes, and call mutating tools **one at a time (sequentially)** inside Gemini Enterprise (tools
+  that require user confirmation cannot run in parallel).
 - Report `SERVER_DEFAULT` values as "not overridden by an admin", not as on/off.
 - Long operations return `status: RUNNING` and an `operation_name`: poll it with
-  `gemini_enterprise_get_operation` until `DONE` before the next dependent step.
+  `gemini_enterprise_get_operation` (also read-only) until `DONE` before the next dependent step.
 
 ## 2. Build a RAG app end to end
 1. `gemini_enterprise_manage_datastore` `create` (`industry_vertical`: `GENERIC` or `MEDIA`).
@@ -31,38 +35,44 @@ retrying. `USER_PROJECT_DENIED` means they also need `roles/serviceusage.service
 4. `gemini_enterprise_manage_apps` `create` with the data store IDs.
 
 ## 3. Connectors and citations
-- Inspect with `configure_connector` `get` / `list_runs`; trigger a sync with `start_run`.
+- Inspect with `gemini_enterprise_inspect` (`target`: `connector` or `connector_runs` with
+  `collection_id`); trigger a sync with `gemini_enterprise_configure_connector` `start_run`.
 - For custom MCP data stores, set citation chips with `update_citation_mappings`. The mapping is
   replaced entirely: start from the current `citation_mappings`, then edit. Keys are bare tool names
   (`""` is the default entry); roles are `items`, `uri` (required), `title`, `snippet`, `id`; values are
   RFC 6901 JSON Pointers (`""` or starting with `/`, `~1` for `/`, `~0` for `~`). Changes apply to new chats.
 
 ## 4. Web app features and models
-- `gemini_enterprise_manage_features`: 38 toggles. `enable_agent_designer` controls no-code chat agents,
-  `enable_workflow_agents` controls Workflow Builder. `enable_all_features` deliberately leaves
-  `remote-vm`, `code-extraction`, skill sharing without approval and `sobi` untouched: enable those
-  only on explicit request.
-- Run `cleanup_invalid_keys` (dry run first) when `get` reports `invalid_keys`.
-- `gemini_enterprise_manage_models`: use the shortcuts or `model_configs` with exact model IDs.
+- Inspect with `gemini_enterprise_inspect` (`target`: `features` or `models`, with `engine_id`).
+  `target: "features"` already returns `toggles`, `wildcard_override`, and `invalid_keys`.
+- `gemini_enterprise_manage_features` `update`: 38 toggles. `enable_agent_designer` controls no-code
+  chat agents, `enable_workflow_agents` controls Workflow Builder. `enable_all_features` deliberately
+  leaves `remote-vm`, `code-extraction`, skill sharing without approval and `sobi` untouched: enable
+  those only on explicit request.
+- Run `gemini_enterprise_manage_features` `cleanup_invalid_keys` (`dry_run: false` after user
+  confirmation) when `invalid_keys` is non-empty.
+- `gemini_enterprise_manage_models` `update`: use the shortcuts or `model_configs` with exact model IDs.
   Anthropic models (Claude Opus/Sonnet 5.5) also require pay-as-you-go overages.
 
 ## 5. Assistant governance
-`gemini_enterprise_manage_assistant` manages the real assistant: `system_instruction`,
-`default_model_id`/`allowed_model_ids`, `web_grounding_type` (`ENTERPRISE_WEB_SEARCH` is data-residency
-compliant, `GOOGLE_SEARCH` is not), `default_web_search_state`, `enable_location_context`,
-`enable_knowledge_catalog`, `banned_phrases` (with `match_type`), `model_armor`,
-`sensitive_data_protection_policy`, `chat_history_retention_days`.
+Inspect with `gemini_enterprise_inspect` (`target: "assistant"`); update with
+`gemini_enterprise_manage_assistant` `update`: `system_instruction`, `default_model_id`/`allowed_model_ids`,
+`web_grounding_type` (`ENTERPRISE_WEB_SEARCH` is data-residency compliant, `GOOGLE_SEARCH` is not),
+`default_web_search_state`, `enable_location_context`, `enable_knowledge_catalog`, `banned_phrases`
+(with `match_type`), `model_armor`, `sensitive_data_protection_policy`, `chat_history_retention_days`.
 
 ## 6. Access control (two layers)
-- App level: `manage_apps` `get-iam` / `set-iam`.
-- Data level: `manage_datastore` `get-iam` / `set-iam` on a data store, or on a connector collection
-  (only `collection_id`) for multi-entity connectors; turn on filtering of data stores by IAM with
-  `set-resource-access-control` (`enabled: true`).
-- Always pass the `etag` from the preceding `get-iam` so concurrent changes are not overwritten.
+- App level: inspect with `gemini_enterprise_inspect` (`target: "app_iam"`), update with
+  `gemini_enterprise_manage_apps` `set-iam`.
+- Data level: inspect with `gemini_enterprise_inspect` (`target: "datastore_iam"` with `datastore_id`,
+  or only `collection_id` for multi-entity connectors); update with `gemini_enterprise_manage_datastore`
+  `set-iam`, and turn on filtering of data stores by IAM with `set-resource-access-control` (`enabled: true`).
+- Always pass the `etag` from the preceding IAM inspection so concurrent changes are not overwritten.
 
 ## 7. Licenses
-`gemini_enterprise_manage_licenses`: `list` (pools, seats, assigned users), `usage_stats`, `assign`,
-`unassign`. When several pools are active, ask which `subscription_id` to use; never guess a tier.
+Inspect pools, assigned users, indexed data, and seat usage with `gemini_enterprise_inspect_licenses`
+(`list` or `usage_stats`); mutate seats with `gemini_enterprise_manage_licenses` (`assign`, `unassign`).
+When several pools are active, ask which `subscription_id` to use; never guess a tier.
 
 ## 8. Safety protocol (mandatory)
 Before any call that deletes, purges, unassigns, replaces IAM policies, enables project-wide access

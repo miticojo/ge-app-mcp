@@ -16,7 +16,14 @@ test('every tool has annotations', () => {
 
 test('only pure read tools are readOnly (Gemini Enterprise skips user confirmation for them)', () => {
   const readOnly = allTools.filter(t => TOOL_ANNOTATIONS[t.name].readOnlyHint).map(t => t.name).sort();
-  assert.deepEqual(readOnly, ['gemini_enterprise_ask', 'gemini_enterprise_get_document', 'gemini_enterprise_get_operation', 'gemini_enterprise_search']);
+  assert.deepEqual(readOnly, [
+    'gemini_enterprise_ask',
+    'gemini_enterprise_get_document',
+    'gemini_enterprise_get_operation',
+    'gemini_enterprise_inspect',
+    'gemini_enterprise_inspect_licenses',
+    'gemini_enterprise_search'
+  ]);
 });
 
 test('tools that can delete or unassign are flagged destructive', () => {

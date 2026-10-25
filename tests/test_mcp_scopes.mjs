@@ -51,29 +51,41 @@ async function testWithScopes(scopes) {
 
   // 3. Attempt unauthorized execution if admin tools are excluded
   if (!hasAdmin) {
-    try {
-      console.log(`\n🛡️ Attempting unauthorized call to "gemini_enterprise_manage_apps" (should be blocked)...`);
-      const res = await client.callTool({
-        name: 'gemini_enterprise_manage_apps',
-        arguments: { action: 'list' }
-      });
+    for (const [toolName, toolArgs] of [
+      ['gemini_enterprise_manage_apps', { action: 'list' }],
+      ['gemini_enterprise_inspect', { target: 'apps' }]
+    ]) {
+      console.log(`\n🛡️ Attempting unauthorized call to "${toolName}" (should be blocked)...`);
+      const res = await client.callTool({ name: toolName, arguments: toolArgs });
       if (res.isError) {
         console.log(`✅ Success! Server blocked execution: "${res.content[0].text}"`);
       } else {
-        console.error('❌ Error: The server allowed an unauthorized tool execution!');
+        throw new Error(`The server allowed unauthorized execution of ${toolName}!`);
       }
-    } catch (err) {
-      console.log(`✅ Success! Server blocked execution via exception: "${err.message}"`);
     }
   }
 
-  // 4. Test authorized execution of billing list if billing scope is present
+  // 3b. Attempt unauthorized execution if billing tools are excluded
+  if (!hasBilling) {
+    console.log(`\n🛡️ Attempting unauthorized call to "gemini_enterprise_inspect_licenses" (should be blocked)...`);
+    const res = await client.callTool({
+      name: 'gemini_enterprise_inspect_licenses',
+      arguments: { action: 'usage_stats' }
+    });
+    if (res.isError) {
+      console.log(`✅ Success! Server blocked execution: "${res.content[0].text}"`);
+    } else {
+      throw new Error('The server allowed unauthorized execution of gemini_enterprise_inspect_licenses!');
+    }
+  }
+
+  // 4. Test authorized execution of billing inspection if billing scope is present
   if (hasBilling) {
     try {
-      console.log(`\n💸 Calling authorized billing tool "gemini_enterprise_manage_licenses" (should succeed)...`);
+      console.log(`\n💸 Calling authorized billing tool "gemini_enterprise_inspect_licenses" (should succeed)...`);
       const res = await client.callTool({
-        name: 'gemini_enterprise_manage_licenses',
-        arguments: { action: 'list', usernames: ['admin@giorgioc.altostrat.com'] }
+        name: 'gemini_enterprise_inspect_licenses',
+        arguments: { action: 'list' }
       });
       console.log('✅ Success! Billing response:');
       console.log(res.content[0].text);

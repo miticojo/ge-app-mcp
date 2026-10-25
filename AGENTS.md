@@ -63,6 +63,8 @@ ge-app-mcp/
 | `gemini_enterprise_manage_target_sites`| `tools/admin.ts` | Administer crawled website URI patterns.| `SiteSearchEngineServiceClient` / REST |
 | `gemini_enterprise_configure_connector`| `tools/admin.ts` | DataConnector get/setup/runs and custom MCP `citation_mappings`. | REST API (`v1` / `v1alpha`) |
 | `gemini_enterprise_get_operation`| `tools/admin.ts` | Poll long-running operations returned by other tools (read-only). | REST `operations.get` |
+| `gemini_enterprise_inspect` | `tools/admin.ts` | Dedicated read-only control-plane inspection (`readOnlyHint: true`, parallel & confirmation-free in GE). | Discovery Engine / Vertex AI read endpoints |
+| `gemini_enterprise_inspect_licenses`| `tools/billing.ts`| Dedicated read-only license pools & usage inspection (`readOnlyHint: true`). | Global REST `licenseConfigs`, `userLicenses`, `licenseConfigsUsageStats` |
 | `gemini_enterprise_manage_licenses`| `tools/billing.ts`| License pools, usage stats, assign/unassign. | Global REST `licenseConfigs`, `userLicenses`, `licenseConfigsUsageStats` |
 
 ---

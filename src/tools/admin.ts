@@ -12,6 +12,7 @@ import { applyFeatureUpdates, describeFeatures, findInvalidFeatureKeys, featureT
 import { applyModelUpdates, describeModels, modelSchemaProperties } from '../domain/engineModels.js';
 import { buildAssistantPatch, describeAssistant, legacyToArgs, parseLegacyCompanyName } from '../domain/assistantConfig.js';
 import { validateCitationMappings } from '../domain/citationMappings.js';
+import { INSPECT_TARGETS, buildInspectCall } from '../domain/inspect.js';
 import { getAuthHeaders, gapicClientOptions, discoveryEngineHost, discoveryEngineBaseUrl, fetchJson } from '../gcp.js';
 
 // Define MCP Tool schemas
@@ -634,6 +635,57 @@ export const adminTools: any[] = [
       },
       required: ['operation_name']
     }
+  },
+  {
+    name: 'gemini_enterprise_inspect',
+    description: 'Read-only inspection of Gemini Enterprise control-plane resources (apps, app_iam, datastores, datastore_iam, connector, connector_runs, target_sites, schema, controls, agents, features + invalid_keys, models, search_ui, assistant, observability, knowledge_graph, skills, skill_revisions). Safe for parallel calls without confirmation prompts.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        target: {
+          type: 'string',
+          enum: [...INSPECT_TARGETS],
+          description: 'Resource to inspect (read-only).'
+        },
+        project_id: {
+          type: 'string',
+          description: 'Optional. Google Cloud Project ID (overrides default).'
+        },
+        location: {
+          type: 'string',
+          description: 'Optional. Google Cloud location (e.g. global, us, eu, us-central1 for skills).'
+        },
+        engine_id: {
+          type: 'string',
+          description: 'App/engine ID. Optional for apps (omit to list all apps, set to get one); required for app_iam, agents, features, models, search_ui, assistant, observability, knowledge_graph.'
+        },
+        datastore_id: {
+          type: 'string',
+          description: 'Data store ID. Optional for datastores (omit to list, set to get one); required for target_sites, schema, controls, or datastore_iam on a data store.'
+        },
+        collection_id: {
+          type: 'string',
+          description: 'Collection ID (defaults to default_collection for datastores). Required for connector, connector_runs, or collection-level datastore_iam.'
+        },
+        agent_id: {
+          type: 'string',
+          description: 'Optional agent ID for target "agents" (omit to list all agents on engine_id, set to get one).'
+        },
+        skill_id: {
+          type: 'string',
+          description: 'Skill ID for target "skills" (get one) or required for "skill_revisions".'
+        },
+        query: {
+          type: 'string',
+          description: 'Optional semantic search query for target "skills" (retrieve).'
+        },
+        top_k: {
+          type: 'number',
+          description: 'Optional max results for target "skills" when query is provided.'
+        }
+      },
+      required: ['target']
+    }
   }
 ];
 
@@ -688,6 +740,11 @@ function pendingOperationResult(operationName: string) {
 // Handler routing tool calls to appropriate actions
 export async function handleAdminToolCall(name: string, args: any): Promise<any> {
   switch (name) {
+    case 'gemini_enterprise_inspect': {
+      const skillsUsable = config.transport === 'stdio' || config.http.acceptedScopes.includes('https://www.googleapis.com/auth/cloud-platform');
+      const { toolName, cleanArgs } = buildInspectCall(args, { skillsUsable });
+      return await handleAdminToolCall(toolName, cleanArgs);
+    }
     case 'gemini_enterprise_manage_apps':
       return await manageApps(args);
     case 'gemini_enterprise_manage_datastore':

@@ -9,8 +9,10 @@ metadata:
 # Agent & Skill Architect
 
 ## 1. Understand what exists
-- `gemini_enterprise_manage_agents` `list`, then `get` for details (call `gemini_enterprise_manage_*` tools
-  sequentially one at a time inside Gemini Enterprise, since confirmation-gated tools cannot run in parallel).
+- Always inspect with `gemini_enterprise_inspect` (`target: "agents"`, with `engine_id` to list or
+  `engine_id` + `agent_id` to get details): it is `readOnlyHint: true`, so in Gemini Enterprise it runs
+  in parallel with zero confirmation prompts. Reserve `gemini_enterprise_manage_agents` for `create`,
+  `update`, and `delete` (call mutating tools one at a time sequentially inside Gemini Enterprise).
   Agent types:
   `lowCodeAgentDefinition` (Agent Designer), `a2aAgentDefinition`, `adkAgentDefinition`,
   `managedAgentDefinition` (Google-made, read-only: never modify or recreate these).
@@ -37,14 +39,14 @@ metadata:
 - The lifecycle `state` (`ENABLED`, `PRIVATE`, `SUSPENDED`, ...) is read-only: report it, do not try to set it.
 
 ## 5. Platform skills (Vertex AI Skill Registry)
-- Find before you create: `gemini_enterprise_manage_skills` `retrieve` with a `query`, or `list`.
-- `create` needs `zipped_filesystem`: a base64 ZIP with `SKILL.md` at the root (frontmatter `name` in
-  lowercase with hyphens, `description` with trigger phrases).
+- Find before you create: `gemini_enterprise_inspect` (`target: "skills"`, optional `query` or `skill_id`,
+  or `target: "skill_revisions"` with `skill_id`).
+- `gemini_enterprise_manage_skills` `create` needs `zipped_filesystem`: a base64 ZIP with `SKILL.md` at
+  the root (frontmatter `name` in lowercase with hyphens, `description` with trigger phrases).
 - `create`, `patch` and `delete` start operations: poll with `gemini_enterprise_get_operation` until
   `DONE` before changing the same skill again (an active operation makes the next change fail).
-- `list_revisions` shows the history of a skill.
-- This tool needs the `cloud-platform` OAuth scope; when it is not available, explain that platform
-  skills must be managed from a local harness or the console.
+- Skill Registry calls need the `cloud-platform` OAuth scope; when it is not available, explain that
+  platform skills must be managed from a local harness or the console.
 
 ## 6. Safety
 Ask for explicit confirmation before `delete` on agents or skills, and before widening sharing to
