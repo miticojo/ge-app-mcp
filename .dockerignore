@@ -1,0 +1,11 @@
+.git
+.github
+node_modules
+build
+tests
+docs
+scripts
+skills
+scratch*
+.env*
+*.md

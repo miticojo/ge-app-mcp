@@ -6,28 +6,18 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
   CallToolRequestSchema,
-  ListToolsRequestSchema,
-  CallToolRequest,
-  ListToolsRequest
+  ListToolsRequestSchema
 } from '@modelcontextprotocol/sdk/types.js';
 import { config } from './config.js';
 import { searchTools, handleSearchToolCall } from './tools/search.js';
 import { adminTools, handleAdminToolCall } from './tools/admin.js';
 import { billingTools, handleBillingToolCall } from './tools/billing.js';
 import { withAnnotations } from './annotations.js';
+import { currentUserCredentials } from './gcp.js';
+import { createGoogleTokenVerifier, startHttpServer } from './http.js';
 
-// Initialize the MCP server
-const server = new Server(
-  {
-    name: 'gemini-enterprise-server',
-    version: '1.0.0',
-  },
-  {
-    capabilities: {
-      tools: {},
-    },
-  }
-);
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const packageVersion: string = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../package.json'), 'utf-8')).version;
 
 // Merge tool definitions dynamically based on allowed scopes
 const allTools: any[] = [];
@@ -35,59 +25,95 @@ if (config.scopes.includes('search')) {
   allTools.push(...withAnnotations(searchTools));
 }
 if (config.scopes.includes('admin')) {
-  allTools.push(...withAnnotations(adminTools));
+  // The Vertex AI Skill Registry only accepts the cloud-platform scope; hide it remotely when
+  // tokens are restricted to discoveryengine.readwrite (see ADR-0003).
+  const skillsUsable = config.transport === 'stdio' || config.http.acceptedScopes.includes('https://www.googleapis.com/auth/cloud-platform');
+  allTools.push(...withAnnotations(adminTools.filter(t => skillsUsable || t.name !== 'gemini_enterprise_manage_skills')));
 }
 if (config.scopes.includes('billing')) {
   allTools.push(...withAnnotations(billingTools));
 }
 
-// Register list tools handler
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: allTools,
-  };
-});
+// Audit trail without arguments (they can contain policies or personal data) and without tokens.
+function auditToolCall(name: string, args: any, outcome: 'ok' | 'error') {
+  console.error(JSON.stringify({
+    severity: outcome === 'ok' ? 'INFO' : 'WARNING',
+    message: 'tool_call',
+    tool: name,
+    action: typeof args?.action === 'string' ? args.action : undefined,
+    principal: currentUserCredentials()?.principal ?? (config.transport === 'stdio' ? 'local-adc' : undefined),
+    outcome
+  }));
+}
 
-// Register call tool handler
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-
-  try {
-    // Security Check: Verify that the tool belongs to the allowed scopes
-    const isToolAllowed = allTools.some(t => t.name === name);
-    if (!isToolAllowed) {
-      throw new Error(`Access Denied: Tool "${name}" is not enabled under the current MCP_SCOPES configuration.`);
-    }
-
-    // Route to search tools
-    if (name.startsWith('gemini_enterprise_search') || name.startsWith('gemini_enterprise_ask') || name.startsWith('gemini_enterprise_get_document')) {
-      return await handleSearchToolCall(name, args);
-    }
-    
-    // Route to billing/licensing tools
-    if (name.startsWith('gemini_enterprise_manage_licenses')) {
-      return await handleBillingToolCall(name, args);
-    }
-    
-    // Route to admin tools
-    if (name.startsWith('gemini_enterprise_manage_') || name.startsWith('gemini_enterprise_configure_') || name === 'gemini_enterprise_get_operation') {
-      return await handleAdminToolCall(name, args);
-    }
-
-    throw new Error(`Tool not found: ${name}`);
-  } catch (error: any) {
-    console.error(`Error executing tool ${name}:`, error);
-    return {
-      isError: true,
-      content: [
-        {
-          type: 'text',
-          text: error.message || String(error),
-        },
-      ],
-    };
+async function routeToolCall(name: string, args: any) {
+  // Security Check: Verify that the tool belongs to the allowed scopes
+  const isToolAllowed = allTools.some(t => t.name === name);
+  if (!isToolAllowed) {
+    throw new Error(`Access Denied: Tool "${name}" is not enabled under the current MCP_SCOPES configuration.`);
   }
-});
+
+  // Route to search tools
+  if (name.startsWith('gemini_enterprise_search') || name.startsWith('gemini_enterprise_ask') || name.startsWith('gemini_enterprise_get_document')) {
+    return await handleSearchToolCall(name, args);
+  }
+
+  // Route to billing/licensing tools
+  if (name.startsWith('gemini_enterprise_manage_licenses')) {
+    return await handleBillingToolCall(name, args);
+  }
+
+  // Route to admin tools
+  if (name.startsWith('gemini_enterprise_manage_') || name.startsWith('gemini_enterprise_configure_') || name === 'gemini_enterprise_get_operation') {
+    return await handleAdminToolCall(name, args);
+  }
+
+  throw new Error(`Tool not found: ${name}`);
+}
+
+// One server per stdio process, or one per request in stateless HTTP mode.
+function createServer(): Server {
+  const server = new Server(
+    {
+      name: 'gemini-enterprise-server',
+      version: packageVersion,
+    },
+    {
+      capabilities: {
+        tools: {},
+      },
+    }
+  );
+
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    return {
+      tools: allTools,
+    };
+  });
+
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+    try {
+      const result = await routeToolCall(name, args);
+      auditToolCall(name, args, 'ok');
+      return result;
+    } catch (error: any) {
+      auditToolCall(name, args, 'error');
+      console.error(`Error executing tool ${name}:`, error?.message || error);
+      return {
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: error.message || String(error),
+          },
+        ],
+      };
+    }
+  });
+
+  return server;
+}
 
 // CLI helper for skills management
 function handleCliCommands(): boolean {
@@ -106,7 +132,6 @@ function handleCliCommands(): boolean {
   }
 
   const action = args[1];
-  const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const packageSkillsDir = path.resolve(__dirname, '../skills');
 
   if (action === 'list') {
@@ -203,19 +228,31 @@ function printHelp() {
   console.log('==================================');
   console.log('Usage:');
   console.log('  npx ge-app-mcp                     # Starts the MCP server on stdio (default)');
+  console.log('  MCP_TRANSPORT=http npx ge-app-mcp  # Starts the Streamable HTTP server (end-user OAuth, see README)');
   console.log('  npx ge-app-mcp skills list         # Lists all available pre-built skills');
   console.log('  npx ge-app-mcp skills install <id> # Installs a pre-built skill to ./skills/\n');
 }
 
-// Start the server using stdio transport
+// Start the server on the configured transport
 async function run() {
   // If CLI subcommand was handled, process exits inside the helper
   if (handleCliCommands()) {
     return;
   }
 
+  if (config.transport === 'http') {
+    const verifier = createGoogleTokenVerifier({
+      allowedClientIds: config.http.allowedOAuthClientIds,
+      acceptedScopes: config.http.acceptedScopes,
+      allowedEmailDomains: config.http.allowedEmailDomains
+    });
+    await startHttpServer({ createServer, verifier, port: config.http.port, allowedHosts: config.http.allowedHosts });
+    console.error(`Gemini Enterprise MCP Server ${packageVersion} listening on :${config.http.port}/mcp (scopes: ${config.scopes.join(',')})`);
+    return;
+  }
+
   const transport = new StdioServerTransport();
-  await server.connect(transport);
+  await createServer().connect(transport);
   console.error('Gemini Enterprise MCP Server running on stdio');
 }
 
