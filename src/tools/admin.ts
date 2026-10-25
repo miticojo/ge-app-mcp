@@ -7,8 +7,8 @@ import {
   SiteSearchEngineServiceClient,
   ServingConfigServiceClient
 } from '@google-cloud/discoveryengine';
-import { GoogleAuth } from 'google-auth-library';
 import { config } from '../config.js';
+import { getAuthHeaders, gapicClientOptions, discoveryEngineHost, discoveryEngineBaseUrl, fetchJson } from '../gcp.js';
 
 // Define MCP Tool schemas
 export const adminTools: any[] = [
@@ -709,10 +709,7 @@ function getGcpParams(args: any) {
     throw new Error('Google Cloud Project ID is not configured. Please provide project_id or verify environment variables.');
   }
 
-  const options: any = { projectId };
-  if (location && location !== 'global') {
-    options.apiEndpoint = `${location}-discoveryengine.googleapis.com`;
-  }
+  const options = gapicClientOptions(projectId, location);
   return { projectId, location, options };
 }
 
@@ -838,7 +835,7 @@ async function manageApps(args: any): Promise<any> {
     const headers = await getAuthHeaders(projectId);
     
     // For specific GCP region routing, ensure host matches location
-    const host = location && location !== 'global' ? `${location}-discoveryengine.googleapis.com` : 'discoveryengine.googleapis.com';
+    const host = discoveryEngineHost(location);
     const restBaseUrl = `https://${host}/v1alpha/${parent}/engines?engineId=${engineId}`;
 
     const res = await fetch(restBaseUrl, {
@@ -946,7 +943,7 @@ async function manageApps(args: any): Promise<any> {
 
   if (action === 'get-iam') {
     console.error(`[Admin] Getting IAM policy for app "${engineId}" in Project "${projectId}"`);
-    const host = `${location}-discoveryengine.googleapis.com`;
+    const host = discoveryEngineHost(location);
     const url = `https://${host}/v1/projects/${projectId}/locations/${location}/collections/${config.collectionId}/engines/${engineId}:getIamPolicy`;
     const headers = await getAuthHeaders(projectId);
     const res = await fetch(url, {
@@ -978,7 +975,7 @@ async function manageApps(args: any): Promise<any> {
       throw new Error('policy object is required for set-iam action.');
     }
     console.error(`[Admin] Setting IAM policy for app "${engineId}" in Project "${projectId}"`);
-    const host = `${location}-discoveryengine.googleapis.com`;
+    const host = discoveryEngineHost(location);
     const url = `https://${host}/v1/projects/${projectId}/locations/${location}/collections/${config.collectionId}/engines/${engineId}:setIamPolicy`;
     const headers = await getAuthHeaders(projectId);
     const res = await fetch(url, {
@@ -1511,33 +1508,6 @@ async function manageControls(args: any): Promise<any> {
   throw new Error(`Unsupported action "${action}" for Controls.`);
 }
 
-// Helper to retrieve auth headers polimorphically (handles Node 18+ iterable headers)
-async function getAuthHeaders(projectId: string): Promise<Record<string, string>> {
-  const auth = new GoogleAuth({
-    scopes: ['https://www.googleapis.com/auth/cloud-platform']
-  });
-  const headers = await auth.getRequestHeaders();
-  const authHeaders: Record<string, string> = {};
-  
-  if (headers && typeof headers.forEach === 'function') {
-    headers.forEach((value, key) => {
-      if (value) {
-        authHeaders[key.toLowerCase()] = value;
-      }
-    });
-  } else if (headers) {
-    for (const [key, value] of Object.entries(headers)) {
-      if (value) {
-        authHeaders[key.toLowerCase()] = value as string;
-      }
-    }
-  }
-  
-  authHeaders['x-goog-user-project'] = projectId;
-  authHeaders['content-type'] = 'application/json';
-  return authHeaders;
-}
-
 // 8. Native Agent Management
 async function manageAgents(args: any): Promise<any> {
   const projectId = args.project_id || config.projectId;
@@ -1564,7 +1534,7 @@ async function manageAgents(args: any): Promise<any> {
     throw new Error('engine_id is required.');
   }
 
-  const host = location && location !== 'global' ? `${location}-discoveryengine.googleapis.com` : 'discoveryengine.googleapis.com';
+  const host = discoveryEngineHost(location);
   const baseUrl = `https://${host}/v1alpha/projects/${projectId}/locations/${location}/collections/${config.collectionId}/engines/${engine_id}/assistants/default_assistant/agents`;
 
   switch (action) {
@@ -2034,15 +2004,8 @@ async function manageFeatures(args: any): Promise<any> {
   const engineName = `${parent}/engines/${engineId}`;
   const action = args.action;
 
-  const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
-  const authClient = await auth.getClient();
-  const token = (await authClient.getAccessToken()).token;
-  const restHeaders = {
-    'Authorization': `Bearer ${token}`,
-    'X-Goog-User-Project': projectId,
-    'Content-Type': 'application/json'
-  };
-  const baseUrl = `https://global-discoveryengine.googleapis.com/v1/${engineName}`;
+  const restHeaders = await getAuthHeaders(projectId);
+  const baseUrl = `${discoveryEngineBaseUrl(location, 'v1alpha')}/${engineName}`;
 
   const mapFeaturesToResponse = (f: any) => ({
     enable_agent_gallery: f['agent-gallery'] === 'FEATURE_STATE_ON',
@@ -2227,17 +2190,10 @@ async function manageFeatures(args: any): Promise<any> {
 async function manageModels(args: any): Promise<any> {
   const { projectId, location, options } = getGcpParams(args);
   const engineId = args.engine_id;
-  const baseUrl = `https://global-discoveryengine.googleapis.com/v1/projects/${projectId}/locations/${location}/collections/${config.collectionId}/engines/${engineId}`;
+  const baseUrl = `${discoveryEngineBaseUrl(location, 'v1alpha')}/projects/${projectId}/locations/${location}/collections/${config.collectionId}/engines/${engineId}`;
   const action = args.action;
 
-  const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
-  const client = await auth.getClient();
-  const token = (await client.getAccessToken()).token;
-  const restHeaders = {
-    'Authorization': `Bearer ${token}`,
-    'X-Goog-User-Project': projectId,
-    'Content-Type': 'application/json'
-  };
+  const restHeaders = await getAuthHeaders(projectId);
 
   const mapModelsToResponse = (m: Record<string, string>) => ({
     enable_gemini_2_5_pro: m['gemini-2.5-pro'] === 'MODEL_ENABLED',
@@ -2442,15 +2398,8 @@ async function manageAssistant(args: any): Promise<any> {
   const engineName = `${parent}/engines/${engineId}`;
   const action = args.action;
 
-  const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
-  const authClient = await auth.getClient();
-  const token = (await authClient.getAccessToken()).token;
-  const baseUrl = `https://global-discoveryengine.googleapis.com/v1alpha/${engineName}`;
-  const headers = {
-    'Authorization': `Bearer ${token}`,
-    'X-Goog-User-Project': projectId,
-    'Content-Type': 'application/json'
-  };
+  const baseUrl = `${discoveryEngineBaseUrl(location, 'v1alpha')}/${engineName}`;
+  const headers = await getAuthHeaders(projectId);
 
   const resGet = await fetch(baseUrl, { headers });
   const engine = await resGet.json();
@@ -2617,15 +2566,8 @@ async function manageObservability(args: any): Promise<any> {
   const engineName = `${parent}/engines/${engineId}`;
   const action = args.action;
 
-  const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
-  const authClient = await auth.getClient();
-  const token = (await authClient.getAccessToken()).token;
-  const baseUrl = `https://global-discoveryengine.googleapis.com/v1alpha/${engineName}`;
-  const headers = {
-    'Authorization': `Bearer ${token}`,
-    'X-Goog-User-Project': projectId,
-    'Content-Type': 'application/json'
-  };
+  const baseUrl = `${discoveryEngineBaseUrl(location, 'v1alpha')}/${engineName}`;
+  const headers = await getAuthHeaders(projectId);
 
   if (action === 'get') {
     const resGet = await fetch(baseUrl, { headers });
@@ -2737,15 +2679,8 @@ async function manageKnowledgeGraph(args: any): Promise<any> {
   const engineName = `${parent}/engines/${engineId}`;
   const action = args.action;
 
-  const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
-  const authClient = await auth.getClient();
-  const token = (await authClient.getAccessToken()).token;
-  const baseUrl = `https://global-discoveryengine.googleapis.com/v1alpha/${engineName}`;
-  const headers = {
-    'Authorization': `Bearer ${token}`,
-    'X-Goog-User-Project': projectId,
-    'Content-Type': 'application/json'
-  };
+  const baseUrl = `${discoveryEngineBaseUrl(location, 'v1alpha')}/${engineName}`;
+  const headers = await getAuthHeaders(projectId);
 
   if (action === 'get') {
     const resGet = await fetch(baseUrl, { headers });

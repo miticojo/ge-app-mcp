@@ -4,6 +4,7 @@ import {
   DocumentServiceClient 
 } from '@google-cloud/discoveryengine';
 import { config } from '../config.js';
+import { gapicClientOptions } from '../gcp.js';
 
 // Define the tool schemas according to @modelcontextprotocol/sdk
 export const searchTools = [
@@ -67,39 +68,32 @@ export const searchTools = [
   }
 ];
 
-// Lazily instantiate clients to avoid overhead if tools are not used immediately
-let searchClient: SearchServiceClient | null = null;
-let conversationalSearchClient: ConversationalSearchServiceClient | null = null;
-let documentClient: DocumentServiceClient | null = null;
+// ADC clients are cached per endpoint; clients bound to an end-user token are built per request
+// so that one user's credentials can never be reused for another user's call.
+const adcClientCache = new Map<string, any>();
 
-function getSearchClient(): SearchServiceClient {
-  if (!searchClient) {
-    const options = config.location && config.location !== 'global'
-      ? { apiEndpoint: `${config.location}-discoveryengine.googleapis.com` }
-      : {};
-    searchClient = new SearchServiceClient(options);
+function getClient<T>(Ctor: new (opts: any) => T, projectId: string, location: string): T {
+  const options = gapicClientOptions(projectId, location);
+  if (options.auth) {
+    return new Ctor(options);
   }
-  return searchClient;
+  const key = `${Ctor.name}:${location}`;
+  if (!adcClientCache.has(key)) {
+    adcClientCache.set(key, new Ctor(options));
+  }
+  return adcClientCache.get(key);
 }
 
-function getConversationalSearchClient(): ConversationalSearchServiceClient {
-  if (!conversationalSearchClient) {
-    const options = config.location && config.location !== 'global'
-      ? { apiEndpoint: `${config.location}-discoveryengine.googleapis.com` }
-      : {};
-    conversationalSearchClient = new ConversationalSearchServiceClient(options);
-  }
-  return conversationalSearchClient;
+function getSearchClient(projectId: string, location: string): SearchServiceClient {
+  return getClient(SearchServiceClient, projectId, location);
 }
 
-function getDocumentClient(): DocumentServiceClient {
-  if (!documentClient) {
-    const options = config.location && config.location !== 'global'
-      ? { apiEndpoint: `${config.location}-discoveryengine.googleapis.com` }
-      : {};
-    documentClient = new DocumentServiceClient(options);
-  }
-  return documentClient;
+function getConversationalSearchClient(projectId: string, location: string): ConversationalSearchServiceClient {
+  return getClient(ConversationalSearchServiceClient, projectId, location);
+}
+
+function getDocumentClient(projectId: string, location: string): DocumentServiceClient {
+  return getClient(DocumentServiceClient, projectId, location);
 }
 
 // Helper to convert protobuf Struct to plain Javascript object
@@ -257,7 +251,7 @@ export async function handleSearchToolCall(name: string, args: any): Promise<any
       if (!query) throw new Error('Argument "query" is required.');
       if (!datastore_id) throw new Error('Argument "datastore_id" is required.');
 
-      const client = getSearchClient();
+      const client = getSearchClient(projectId, location);
       const servingConfig = `projects/${projectId}/locations/${location}/collections/${collectionId}/dataStores/${datastore_id}/servingConfigs/default_search`;
 
       const request = {
@@ -294,7 +288,7 @@ export async function handleSearchToolCall(name: string, args: any): Promise<any
       if (!question) throw new Error('Argument "question" is required.');
       if (!datastore_id) throw new Error('Argument "datastore_id" is required.');
 
-      const client = getConversationalSearchClient();
+      const client = getConversationalSearchClient(projectId, location);
       const servingConfig = `projects/${projectId}/locations/${location}/collections/${collectionId}/dataStores/${datastore_id}/servingConfigs/default_search`;
 
       const request = {
@@ -343,7 +337,7 @@ export async function handleSearchToolCall(name: string, args: any): Promise<any
       if (!document_id) throw new Error('Argument "document_id" is required.');
       if (!datastore_id) throw new Error('Argument "datastore_id" is required.');
 
-      const client = getDocumentClient();
+      const client = getDocumentClient(projectId, location);
       const namePath = `projects/${projectId}/locations/${location}/collections/${collectionId}/dataStores/${datastore_id}/branches/0/documents/${document_id}`;
 
       const [document] = await client.getDocument({ name: namePath });

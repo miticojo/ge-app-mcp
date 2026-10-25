@@ -1,5 +1,5 @@
-import { GoogleAuth } from 'google-auth-library';
 import { config } from '../config.js';
+import { getAuthHeaders } from '../gcp.js';
 
 export const billingTools = [
   {
@@ -37,33 +37,6 @@ export const billingTools = [
     }
   }
 ];
-
-async function getAuthHeaders(projectId: string): Promise<Record<string, string>> {
-  const auth = new GoogleAuth({
-    scopes: ['https://www.googleapis.com/auth/cloud-platform']
-  });
-  const headers = await auth.getRequestHeaders();
-  const authHeaders: Record<string, string> = {};
-  
-  if (headers && typeof headers.forEach === 'function') {
-    headers.forEach((value, key) => {
-      if (value) {
-        authHeaders[key.toLowerCase()] = value;
-      }
-    });
-  } else if (headers) {
-    for (const [key, value] of Object.entries(headers)) {
-      if (value) {
-        authHeaders[key.toLowerCase()] = value as string;
-      }
-    }
-  }
-  
-  // Set lowercase x-goog-user-project header to prevent comma-separated duplication on merge
-  authHeaders['x-goog-user-project'] = projectId;
-  authHeaders['content-type'] = 'application/json';
-  return authHeaders;
-}
 
 export async function handleBillingToolCall(name: string, args: any): Promise<any> {
   if (name !== 'gemini_enterprise_manage_licenses') {
