@@ -57,31 +57,22 @@ export const adminTools: any[] = [
   },
   {
     name: 'gemini_enterprise_manage_datastore',
-    description: 'Manage Gemini Enterprise DataStores. Supports create, list, and delete operations.',
+    description: 'Manage Gemini Enterprise data stores and resource-level IAM: list, get, create, delete, get-iam, set-iam (data store, or collection for multi-entity connectors), and set-resource-access-control (project-level filtering of data stores by IAM).',
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['create', 'list', 'delete'],
-          description: 'The action to perform: create, list, or delete.'
+          enum: ['list', 'get', 'create', 'delete', 'get-iam', 'set-iam', 'set-resource-access-control'],
+          description: 'The action to perform.'
         },
-        project_id: {
-          type: 'string',
-          description: 'Optional. Google Cloud Project ID (overrides default).'
-        },
-        location: {
-          type: 'string',
-          description: 'Optional. Google Cloud Region (overrides default).'
-        },
-        datastore_id: {
-          type: 'string',
-          description: 'ID of the DataStore. Required for create and delete.'
-        },
-        industry_vertical: {
-          type: 'string',
-          description: 'Optional. Industry vertical for the DataStore (e.g., "GENERIC", "MEDIA"). Defaults to "GENERIC".'
-        }
+        project_id: { type: 'string', description: 'Optional. Google Cloud Project ID (overrides default).' },
+        location: { type: 'string', description: 'Optional. Google Cloud Region (overrides default).' },
+        collection_id: { type: 'string', description: 'Optional. Collection ID (defaults to the configured collection). For get-iam/set-iam without datastore_id, targets the collection itself.' },
+        datastore_id: { type: 'string', description: 'ID of the data store. Required for get, create and delete.' },
+        industry_vertical: { type: 'string', description: 'Optional. Industry vertical for create: GENERIC (default) or MEDIA.' },
+        policy: { type: 'object', description: 'For set-iam. Full IAM policy including the etag returned by get-iam.' },
+        enabled: { type: 'boolean', description: 'For set-resource-access-control. true filters data stores and connectors shown to users by their resource-level IAM.' }
       },
       required: ['action']
     }
@@ -641,6 +632,8 @@ function textResult(payload: unknown) {
   return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
 }
 
+const RESOURCE_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$/;
+
 const LRO_TIMEOUT = Symbol('lro-timeout');
 
 /**
@@ -960,42 +953,74 @@ async function manageApps(args: any): Promise<any> {
 // 2. DataStore Management
 async function manageDataStores(args: any): Promise<any> {
   const { projectId, location, options } = getGcpParams(args);
-  const client = new DataStoreServiceClient(options);
-  const parent = `projects/${projectId}/locations/${location}/collections/${config.collectionId}`;
-  
   const action = args.action;
+  const collectionId = args.collection_id || config.collectionId;
+  if (!RESOURCE_ID.test(collectionId)) throw new Error('Invalid collection_id.');
+  const parent = `projects/${projectId}/locations/${location}/collections/${collectionId}`;
+  const dataStoreId = args.datastore_id;
+  if (dataStoreId !== undefined && !RESOURCE_ID.test(dataStoreId)) throw new Error('Invalid datastore_id.');
+  const dataStoreName = `${parent}/dataStores/${dataStoreId}`;
+
+  if (action === 'set-resource-access-control') {
+    if (typeof args.enabled !== 'boolean') throw new Error('enabled (boolean) is required for set-resource-access-control.');
+    const headers = await getAuthHeaders(projectId);
+    const mask = 'customer_provided_config.resource_access_control_config.data_store_access_control_enabled';
+    const project = await fetchJson(`${discoveryEngineBaseUrl('global', 'v1alpha')}/projects/${projectId}?updateMask=${mask}`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ customerProvidedConfig: { resourceAccessControlConfig: { dataStoreAccessControlEnabled: args.enabled } } })
+    }, 'Update project resource access control');
+    return textResult({
+      status: 'SUCCESS',
+      data_store_access_control_enabled: project.customerProvidedConfig?.resourceAccessControlConfig?.dataStoreAccessControlEnabled ?? args.enabled
+    });
+  }
+
+  if (action === 'get-iam' || action === 'set-iam') {
+    const resource = dataStoreId ? dataStoreName : parent;
+    const headers = await getAuthHeaders(projectId);
+    const base = `${discoveryEngineBaseUrl(location, 'v1alpha')}/${resource}`;
+    if (action === 'get-iam') {
+      const policy = await fetchJson(`${base}:getIamPolicy?options.requestedPolicyVersion=3`, { headers }, 'Get IAM policy');
+      return textResult({ status: 'SUCCESS', resource, policy });
+    }
+    if (!args.policy || typeof args.policy !== 'object') throw new Error('policy object is required for set-iam.');
+    if (!args.policy.etag) throw new Error('policy.etag is required: read it with get-iam first to avoid overwriting concurrent changes.');
+    const policy = await fetchJson(`${base}:setIamPolicy`, { method: 'POST', headers, body: JSON.stringify({ policy: args.policy }) }, 'Set IAM policy');
+    return textResult({ status: 'SUCCESS', resource, policy });
+  }
+
+  const client = new DataStoreServiceClient(options);
 
   if (action === 'list') {
     const [dataStores] = await client.listDataStores({ parent });
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            status: 'SUCCESS',
-            message: `Successfully retrieved DataStores for project "${projectId}".`,
-            count: dataStores.length,
-            dataStores: dataStores.map((ds: any) => ({
-              name: ds.name,
-              displayName: ds.displayName,
-              industryVertical: ds.industryVertical,
-              createTime: ds.createTime
-            }))
-          }, null, 2)
-        }
-      ]
-    };
+    return textResult({
+      status: 'SUCCESS',
+      message: `Successfully retrieved DataStores for project "${projectId}".`,
+      count: dataStores.length,
+      dataStores: dataStores.map((ds: any) => ({
+        name: ds.name,
+        displayName: ds.displayName,
+        industryVertical: ds.industryVertical,
+        createTime: ds.createTime
+      }))
+    });
   }
 
-  const dataStoreId = args.datastore_id;
   if (!dataStoreId) {
-    throw new Error('datastore_id is required for create and delete actions.');
+    throw new Error('datastore_id is required for get, create and delete actions.');
   }
 
-  const dataStoreName = `${parent}/dataStores/${dataStoreId}`;
+  if (action === 'get') {
+    const [dataStore] = await client.getDataStore({ name: dataStoreName });
+    return textResult({ status: 'SUCCESS', dataStore });
+  }
 
   if (action === 'create') {
     const industryVertical = args.industry_vertical || 'GENERIC';
+    if (!['GENERIC', 'MEDIA'].includes(industryVertical)) {
+      throw new Error('industry_vertical must be GENERIC or MEDIA (HEALTHCARE_FHIR was deprecated).');
+    }
     const [operation] = await client.createDataStore({
       parent,
       dataStoreId,
@@ -1006,50 +1031,30 @@ async function manageDataStores(args: any): Promise<any> {
     });
 
     const settled = await settleGapicOperation(operation);
-
     if (!settled.done) return pendingOperationResult(settled.operation);
-
     const [createdDataStore] = settled.result;
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            status: 'SUCCESS',
-            message: `DataStore "${dataStoreId}" created successfully.`,
-            dataStore: {
-              name: createdDataStore.name,
-              displayName: createdDataStore.displayName,
-              industryVertical: createdDataStore.industryVertical
-            }
-          }, null, 2)
-        }
-      ]
-    };
+    return textResult({
+      status: 'SUCCESS',
+      message: `DataStore "${dataStoreId}" created successfully.`,
+      dataStore: {
+        name: createdDataStore.name,
+        displayName: createdDataStore.displayName,
+        industryVertical: createdDataStore.industryVertical
+      }
+    });
   }
 
   if (action === 'delete') {
     const [operation] = await client.deleteDataStore({ name: dataStoreName });
     const settled = await settleGapicOperation(operation);
     if (!settled.done) return pendingOperationResult(settled.operation);
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            status: 'SUCCESS',
-            message: `DataStore "${dataStoreId}" deleted successfully.`
-          }, null, 2)
-        }
-      ]
-    };
+    return textResult({ status: 'SUCCESS', message: `DataStore "${dataStoreId}" deleted successfully.` });
   }
 
   throw new Error(`Unsupported action "${action}" for DataStores.`);
 }
 
 // 3. Connector Configuration (DataConnector REST API)
-const RESOURCE_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$/;
 
 async function configureConnector(args: any): Promise<any> {
   const { projectId, location } = getGcpParams(args);
