@@ -36,9 +36,9 @@ const EXPECTED_GCP_MAPPINGS = {
     requiredArgs: ['action']
   },
   gemini_enterprise_configure_connector: {
-    client: 'DataStoreServiceClient',
-    proto: 'google.cloud.discoveryengine.v1.DataStore',
-    requiredArgs: ['datastore_id', 'connector_type', 'config_payload']
+    client: null, // REST only: DataConnector is not exposed by the Node SDK
+    proto: 'google.cloud.discoveryengine.v1.DataConnector',
+    requiredArgs: ['action', 'collection_id']
   },
   gemini_enterprise_manage_target_sites: {
     client: 'SiteSearchEngineServiceClient',

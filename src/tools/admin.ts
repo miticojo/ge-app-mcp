@@ -11,6 +11,7 @@ import { config } from '../config.js';
 import { applyFeatureUpdates, describeFeatures, findInvalidFeatureKeys, featureToggleSchemaProperties } from '../domain/engineFeatures.js';
 import { applyModelUpdates, describeModels, modelSchemaProperties } from '../domain/engineModels.js';
 import { buildAssistantPatch, describeAssistant, legacyToArgs, parseLegacyCompanyName } from '../domain/assistantConfig.js';
+import { validateCitationMappings } from '../domain/citationMappings.js';
 import { getAuthHeaders, gapicClientOptions, discoveryEngineHost, discoveryEngineBaseUrl, fetchJson } from '../gcp.js';
 
 // Define MCP Tool schemas
@@ -87,32 +88,28 @@ export const adminTools: any[] = [
   },
   {
     name: 'gemini_enterprise_configure_connector',
-    description: 'Configure third-party data connectors (such as Jira, Salesforce, Confluence) for a DataStore.',
+    description: 'Manage the data connector of a connector collection (third-party SaaS or custom MCP data stores): get, setup, update_citation_mappings, list_runs, start_run.',
     inputSchema: {
       type: 'object',
       properties: {
-        datastore_id: {
+        action: {
           type: 'string',
-          description: 'The ID of the target DataStore.'
+          enum: ['get', 'setup', 'update_citation_mappings', 'list_runs', 'start_run'],
+          description: 'get, setup (create collection + connector, returns an operation), update_citation_mappings (custom MCP data stores), list_runs, or start_run.'
         },
-        connector_type: {
-          type: 'string',
-          description: 'The type of the third-party connector (e.g., "jira", "salesforce", "confluence", "slack").'
-        },
-        config_payload: {
+        collection_id: { type: 'string', description: 'ID of the connector collection. Required.' },
+        collection_display_name: { type: 'string', description: 'For setup. Human readable collection name.' },
+        data_connector: { type: 'object', description: 'For setup. DataConnector resource body (dataSource, params, entities, refreshInterval, ...).' },
+        citation_mappings: {
           type: 'object',
-          description: 'The credential and connection configuration payload for the connector.'
+          description: 'For update_citation_mappings. Tool name ("" = default) -> {items, uri, title, snippet, id} RFC 6901 JSON Pointers. Replaces the whole mapping.'
         },
-        project_id: {
-          type: 'string',
-          description: 'Optional. Google Cloud Project ID.'
-        },
-        location: {
-          type: 'string',
-          description: 'Optional. Google Cloud Region.'
-        }
+        entities: { type: 'array', items: { type: 'string' }, description: 'For start_run. Entities to sync (all if omitted).' },
+        force_refresh_content: { type: 'boolean', description: 'For start_run. Re-ingest all content.' },
+        project_id: { type: 'string', description: 'Optional. Google Cloud Project ID.' },
+        location: { type: 'string', description: 'Optional. Google Cloud Region.' }
       },
-      required: ['datastore_id', 'connector_type', 'config_payload']
+      required: ['action', 'collection_id']
     }
   },
   {
@@ -1012,33 +1009,70 @@ async function manageDataStores(args: any): Promise<any> {
   throw new Error(`Unsupported action "${action}" for DataStores.`);
 }
 
-// 3. Connector Configuration (Mock/Simulation fallback as not exposed in v1 SDK clients)
+// 3. Connector Configuration (DataConnector REST API)
+const RESOURCE_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$/;
+
 async function configureConnector(args: any): Promise<any> {
   const { projectId, location } = getGcpParams(args);
-  const { datastore_id, connector_type, config_payload } = args;
+  const { action, collection_id: collectionId } = args;
+  if (!collectionId || !RESOURCE_ID.test(collectionId)) throw new Error('A valid collection_id is required.');
 
-  console.error(`[ConnectorConfig] Configuring ${connector_type} connector for DataStore ${datastore_id} in project ${projectId}`);
+  const headers = await getAuthHeaders(projectId);
+  const locationPath = `projects/${projectId}/locations/${location}`;
+  const connectorPath = `${locationPath}/collections/${collectionId}/dataConnector`;
+  // connectorRuns endpoints reject project IDs (observed 2026-10-25) and require the project-number
+  // form, so they use the canonical resource name returned by getDataConnector.
+  const canonicalConnectorName = async (): Promise<string> =>
+    (await fetchJson(`${discoveryEngineBaseUrl(location, 'v1')}/${connectorPath}`, { headers }, 'Get data connector')).name;
 
-  return {
-    content: [
-      {
-        type: 'text',
-        text: JSON.stringify({
-          status: 'SUCCESS',
-          message: `Successfully configured third-party data connector "${connector_type}" for DataStore "${datastore_id}".`,
-          details: {
-            datastoreId: datastore_id,
-            connectorType: connector_type,
-            projectId,
-            location,
-            state: 'ACTIVE',
-            syncStatus: 'READY_TO_SYNC',
-            configPayload: config_payload
-          }
-        }, null, 2)
-      }
-    ]
-  };
+  switch (action) {
+    case 'get': {
+      const connector = await fetchJson(`${discoveryEngineBaseUrl(location, 'v1')}/${connectorPath}`, { headers }, 'Get data connector');
+      return textResult({ status: 'SUCCESS', data_connector: connector });
+    }
+
+    case 'setup': {
+      if (!args.data_connector || typeof args.data_connector !== 'object') throw new Error('data_connector object is required for setup.');
+      const displayName = args.collection_display_name || collectionId;
+      const url = `${discoveryEngineBaseUrl(location, 'v1alpha')}/${locationPath}:setUpDataConnectorV2?collectionId=${encodeURIComponent(collectionId)}&collectionDisplayName=${encodeURIComponent(displayName)}`;
+      const operation = await fetchJson(url, { method: 'POST', headers, body: JSON.stringify(args.data_connector) }, 'Set up data connector');
+      return textResult({ status: 'STARTED', message: 'Connector setup started. Poll the operation until done.', operation: operation.name, done: Boolean(operation.done) });
+    }
+
+    case 'update_citation_mappings': {
+      const mappings = validateCitationMappings(args.citation_mappings);
+      // Narrow mask and only citation_mappings in actionParams, as required by the docs:
+      // echoing other actionParams (e.g. OAuth settings) back would fail or overwrite them.
+      const connector = await fetchJson(`${discoveryEngineBaseUrl(location, 'v1')}/${connectorPath}?updateMask=action_config.action_params`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ actionConfig: { actionParams: { citation_mappings: mappings } } })
+      }, 'Update citation mappings');
+      return textResult({
+        status: 'SUCCESS',
+        message: 'Citation mappings replaced. They apply to new chats only.',
+        citation_mappings: connector.actionConfig?.actionParams?.citation_mappings ?? mappings
+      });
+    }
+
+    case 'list_runs': {
+      const data = await fetchJson(`${discoveryEngineBaseUrl(location, 'v1alpha')}/${await canonicalConnectorName()}/connectorRuns?pageSize=20`, { headers }, 'List connector runs');
+      return textResult({ status: 'SUCCESS', connector_runs: data.connectorRuns || [], next_page_token: data.nextPageToken });
+    }
+
+    case 'start_run': {
+      const body: any = {};
+      if (Array.isArray(args.entities)) body.entities = args.entities.map(String);
+      if (args.force_refresh_content !== undefined) body.forceRefreshContent = Boolean(args.force_refresh_content);
+      const run = await fetchJson(`${discoveryEngineBaseUrl(location, 'v1alpha')}/${await canonicalConnectorName()}:startConnectorRun`, {
+        method: 'POST', headers, body: JSON.stringify(body)
+      }, 'Start connector run');
+      return textResult({ status: 'STARTED', connector_run: run });
+    }
+
+    default:
+      throw new Error(`Unsupported action "${action}" for gemini_enterprise_configure_connector.`);
+  }
 }
 
 // 4. Target Sites Management
